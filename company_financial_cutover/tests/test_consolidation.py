@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 from unittest.mock import patch
 
 from odoo import Command
@@ -331,3 +331,143 @@ class TestConsolidation(FinancialCutoverCase):
             'cutover_id': batch.id, 'source_move_id': source.id, 'target_move_id': copied.id})
         with self.assertRaisesRegex(UserError, 'different rates or payment recognition'):
             batch.action_preview()
+
+    def test_draft_copy_notice_then_explicit_posted_match_prevents_double_opening(self):
+        source = self._invoice()
+        source.ref = 'Old customer reference'
+        self._entry(self.source, [('bank', 30), ('equity', -30)])
+        copied = self._copied_invoice(source)
+        batch = self._existing()
+        batch.action_match()
+        self.assertEqual(batch.check_status, 'ready')
+        self.assertIn('Possible draft invoice/bill copies', batch.check_report)
+        self.assertIn('duplicate the carried balance', batch.check_report)
+        self.assertIn('post and explicitly match', batch.check_report)
+        self.assertEqual(copied.state, 'draft')
+        self.assertFalse(batch.move_id)
+        # Posting is an explicit native operator decision; the mover never does
+        # it. Once matched, only the remaining bank/equity balance is carried.
+        copied.action_post()
+        self.env['company.financial.copied.invoice'].create({
+            'cutover_id': batch.id, 'source_move_id': source.id, 'target_move_id': copied.id})
+        self._run(batch)
+        self.assertNotIn('Possible draft invoice/bill copies', batch.check_report)
+        self.assertFalse(batch.move_id.line_ids.filtered(lambda line: line.account_id.account_type == 'asset_receivable'))
+        self.assertEqual(copied.amount_residual, 100)
+        ar = self.env['account.move.line'].search([
+            ('company_id', '=', self.target.id), ('parent_state', '=', 'posted'),
+            ('account_id.account_type', '=', 'asset_receivable')])
+        self.assertEqual(sum(ar.mapped('balance')), 100)
+
+    def test_unrelated_new_trading_draft_is_preserved_without_copy_notice(self):
+        source = self._invoice()
+        draft = self._copied_invoice(source)
+        draft.ref = 'Separate new trading'
+        batch = self._existing()
+        self._run(batch)
+        self.assertNotIn('Possible draft invoice/bill copies', batch.check_report)
+        self.assertEqual(draft.state, 'draft')
+        self.assertEqual(batch.move_id.line_ids.filtered(lambda line: line.account_id.account_type == 'asset_receivable').balance, 100)
+
+    def test_matching_draft_added_after_preview_requires_review(self):
+        source = self._invoice()
+        batch = self._existing()
+        batch.action_match()
+        batch.action_preview()
+        copied = self._copied_invoice(source)
+        with self.assertRaisesRegex(UserError, 'changed.*fresh Preview'):
+            batch.action_apply()
+        self.assertFalse(batch.move_id)
+        self.assertEqual(copied.state, 'draft')
+        batch.action_match()
+        self.assertIn('Possible draft invoice/bill copies', batch.check_report)
+
+    def test_matching_draft_changed_after_preview_requires_review(self):
+        source = self._invoice()
+        copied = self._copied_invoice(source)
+        batch = self._existing()
+        batch.action_match()
+        batch.action_preview()
+        copied.ref = 'Changed draft reference'
+        with self.assertRaisesRegex(UserError, 'changed.*fresh Preview'):
+            batch.action_apply()
+        self.assertFalse(batch.move_id)
+
+    def test_copied_due_date_notice_preserves_intended_schedule_and_payment(self):
+        source = self._invoice()
+        self._entry(self.source, [('bank', 30), ('equity', -30)])
+        copied = self._copied_invoice(source)
+        copied.invoice_date_due = source.invoice_date_due + timedelta(days=180)
+        copied.action_post()
+        payment = self._entry(self.target, [('bank', 40), ('receivable', -40, self.customer)])
+        ar = copied.line_ids.filtered(lambda line: line.account_id.account_type == 'asset_receivable')
+        (ar | payment.line_ids.filtered(lambda line: line.account_id == ar.account_id)).reconcile()
+        due = ar.date_maturity
+        batch = self._existing()
+        batch.action_match()
+        pair = self.env['company.financial.copied.invoice'].create({
+            'cutover_id': batch.id, 'source_move_id': source.id, 'target_move_id': copied.id})
+        self._run(batch)
+        self.assertTrue(pair.schedule_differs)
+        self.assertNotEqual(pair.source_payment_schedule, pair.target_payment_schedule)
+        self.assertIn('Payment schedules differ', batch.check_report)
+        self.assertIn(pair.source_payment_schedule, batch.check_report)
+        self.assertIn(pair.target_payment_schedule, batch.check_report)
+        self.assertEqual(batch.check_status, 'ready')
+        self.assertEqual(copied.amount_residual, 60)
+        self.assertEqual(ar.date_maturity, due)
+        self.assertEqual(payment.state, 'posted')
+
+    def test_identical_copied_schedules_do_not_warn(self):
+        source = self._invoice()
+        self._entry(self.source, [('bank', 30), ('equity', -30)])
+        copied = self._copied_invoice(source)
+        copied.invoice_date_due = source.invoice_date_due
+        copied.action_post()
+        batch = self._existing()
+        batch.action_match()
+        pair = self.env['company.financial.copied.invoice'].create({
+            'cutover_id': batch.id, 'source_move_id': source.id, 'target_move_id': copied.id})
+        batch.action_match()
+        self.assertFalse(pair.schedule_differs)
+        self.assertEqual(pair.source_payment_schedule, pair.target_payment_schedule)
+        self.assertNotIn('Payment schedules differ', batch.check_report)
+
+    def test_different_installments_with_same_total_are_shown_for_review(self):
+        source = self._invoice()
+        self._entry(self.source, [('bank', 30), ('equity', -30)])
+        term = self.env['account.payment.term'].create({'name': 'Two installments',
+            'company_id': self.target.id, 'line_ids': [
+                Command.create({'value': 'percent', 'value_amount': 50, 'delay_type': 'days_after', 'nb_days': 31}),
+                Command.create({'value': 'percent', 'value_amount': 50, 'delay_type': 'days_after', 'nb_days': 61})]})
+        copied = self._copied_invoice(source)
+        copied.invoice_payment_term_id = term
+        copied.action_post()
+        batch = self._existing()
+        batch.action_match()
+        pair = self.env['company.financial.copied.invoice'].create({
+            'cutover_id': batch.id, 'source_move_id': source.id, 'target_move_id': copied.id})
+        batch.action_match()
+        self.assertEqual(len(batch._payment_schedule(source)), 1)
+        self.assertEqual(len(batch._payment_schedule(copied)), 2)
+        self.assertTrue(pair.schedule_differs)
+        self.assertIn('; ', pair.target_payment_schedule)
+        self.assertIn('Payment schedules differ', batch.check_report)
+        self.assertEqual(batch.check_status, 'ready')
+
+    def test_copied_due_date_changed_after_preview_requires_review(self):
+        source = self._invoice()
+        self._entry(self.source, [('bank', 30), ('equity', -30)])
+        copied = self._copied_invoice(source)
+        copied.action_post()
+        batch = self._existing()
+        batch.action_match()
+        self.env['company.financial.copied.invoice'].create({
+            'cutover_id': batch.id, 'source_move_id': source.id, 'target_move_id': copied.id})
+        batch.action_match()
+        batch.action_preview()
+        ar = copied.line_ids.filtered(lambda line: line.account_id.account_type == 'asset_receivable')
+        ar.date_maturity += timedelta(days=180)
+        with self.assertRaisesRegex(UserError, 'changed.*fresh Preview'):
+            batch.action_apply()
+        self.assertFalse(batch.move_id)

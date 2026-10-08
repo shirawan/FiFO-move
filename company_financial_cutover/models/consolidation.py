@@ -6,7 +6,7 @@ from html import escape
 
 from odoo import api, fields, models
 from odoo.exceptions import UserError
-from odoo.tools import formatLang
+from odoo.tools import format_date, formatLang
 
 from .cutover import OPEN_ITEM_TYPES
 
@@ -148,12 +148,57 @@ class FinancialCutover(models.Model):
 
     def _overlap_evidence(self):
         moves = self.prior_opening_move_ids | self.copied_invoice_ids.source_move_id | self.copied_invoice_ids.target_move_id
+        # A matching draft added or changed after review must not silently become
+        # a duplicate the operator never saw. These records stay untouched.
+        candidates, truncated = self._existing_document_candidates(self._source_lines()) if (
+            self.include_financial and self.destination_mode == "existing") else ([], False)
+        moves |= self.env["account.move"].browse([target.id for target, _sources in candidates])
         return [self.destination_mode, self.existing_data_reviewed,
             [(account.id, self.currency_id.round(balance)) for account, balance in sorted(self._destination_totals(), key=lambda row: row[0].id)]
                 if self.include_financial and self.destination_mode == "existing" else [], [
             [self._signature(move, ("name", "ref", "state", "company_id", "date", "invoice_date", "move_type", "currency_id", "journal_id", "reversed_entry_id")),
              [self._signature(line, ("name", "account_id", "partner_id", "balance", "amount_currency", "currency_id", "date_maturity", "tax_ids", "tax_tag_ids", "amount_residual", "amount_residual_currency", "matched_debit_ids", "matched_credit_ids"))
-                for line in move.line_ids.sorted("id")]] for move in moves.sorted("id")]]
+                for line in move.line_ids.sorted("id")]] for move in moves.sorted("id")], truncated]
+
+    def _existing_document_candidates(self, lines):
+        """References identify review candidates, never an automatic exclusion."""
+        Move = self.env["account.move"]
+        sources = lines.move_id.filtered(lambda move: move.is_invoice(include_receipts=False))
+        if not sources:
+            return [], False
+        keys = defaultdict(list)
+        for source in sources:
+            # A copy often stores the old document number as its reference,
+            # even when the old document also has a vendor/customer reference.
+            for reference in {self._identity(source.ref, True), self._identity(source.name, True)} - {""}:
+                keys[(source.move_type, reference, source.currency_id.id, source.amount_total)].append(source.id)
+        targets = Move.search([("company_id", "=", self.target_company_id.id),
+            ("state", "in", ["posted", "draft"]), ("move_type", "in", list(set(sources.mapped("move_type"))))],
+            order="id", limit=100001)
+        candidates = []
+        for target in targets:
+            reference = self._identity(target.ref or target.name, True)
+            key = (target.move_type, reference, target.currency_id.id, target.amount_total)
+            if reference and key in keys and target not in self.copied_invoice_ids.target_move_id:
+                candidates.append((target, keys[key]))
+        return candidates, len(targets) > 100000
+
+    def _payment_schedule(self, move):
+        """Compare original installments, independent of subsequent payments."""
+        totals = defaultdict(lambda: [0.0, 0.0])
+        for line in move.line_ids.filtered(lambda line: line.account_id.account_type in OPEN_ITEM_TYPES):
+            values = totals[(str(line.date_maturity or ""), line.currency_id.id)]
+            values[0] += line.balance
+            values[1] += line.amount_currency
+        return sorted((date, currency, move.company_id.currency_id.round(values[0]),
+            self.env["res.currency"].browse(currency).round(values[1]))
+            for (date, currency), values in totals.items())
+
+    def _payment_schedule_text(self, move):
+        return "; ".join("%s due %s" % (
+            formatLang(self.env, abs(foreign), currency_obj=self.env["res.currency"].browse(currency)),
+            format_date(self.env, date) if date else "no due date")
+            for date, currency, _balance, foreign in self._payment_schedule(move))
 
     def _plan(self):
         rows, digest, count = super()._plan()
@@ -169,19 +214,35 @@ class FinancialCutover(models.Model):
             notices.append("The new company is already in use. Its invoices, bills, payments and new trading entries stay in place. Only the earlier opening entries you select receive reversals; explicitly matched copied invoices/bills are omitted from this opening.")
             # Candidate detection is advisory. Same totals/references are not
             # enough to decide that two legitimate transactions are duplicates.
-            source_moves = lines.move_id.filtered(lambda move: move.is_invoice(include_receipts=False))
-            keys = {(move.move_type, self._identity(move.ref or move.name, True), move.currency_id.id, move.amount_total): move for move in source_moves}
-            targets = self.env["account.move"].search([("company_id", "=", self.target_company_id.id),
-                ("state", "=", "posted"), ("move_type", "in", list({move.move_type for move in source_moves}))], limit=100001)
-            candidates = []
-            for target in targets:
-                key = (target.move_type, self._identity(target.ref or target.name, True), target.currency_id.id, target.amount_total)
-                if key in keys and target not in self.copied_invoice_ids.target_move_id:
-                    candidates.append("%s / %s" % (keys[key].display_name, target.display_name))
-            if candidates:
-                notices.append("Possible invoices/bills already copied here: " + ", ".join(candidates[:20]) + ". Match confirmed copies under Existing data. Similar references alone never skip a balance.")
-            if len(targets) > 100000:
-                notices.append("More than 100,000 destination invoices/bills exist; the candidate scan is partial. Review the complete ledger before confirming existing data.")
+            candidates, truncated = self._existing_document_candidates(lines)
+            for state in ("draft", "posted"):
+                selected = [(target, sources) for target, sources in candidates if target.state == state]
+                if not selected:
+                    continue
+                labels = []
+                for target, sources in selected[:20]:
+                    names = self.env["account.move"].browse(sources[:3]).mapped("display_name")
+                    labels.append("%s / %s%s" % (", ".join(names), target.display_name,
+                        " (more old matches)" if len(sources) > 3 else ""))
+                if len(selected) > 20:
+                    labels.append("%s more possible copies" % (len(selected) - 20))
+                if state == "draft":
+                    notices.append("Possible draft invoice/bill copies: " + ", ".join(labels)
+                        + ". Posting a copied draft after this move would duplicate the carried balance. "
+                        "Before moving, cancel confirmed duplicate drafts or post and explicitly match confirmed copies under Existing data. "
+                        "Separate new trading drafts can stay. Drafts are never posted, cancelled or excluded automatically.")
+                else:
+                    notices.append("Possible invoices/bills already copied here: " + ", ".join(labels)
+                        + ". Match confirmed copies under Existing data. Similar references alone never skip a balance.")
+            for pair in self.copied_invoice_ids:
+                if pair.source_move_id and pair.target_move_id and pair.schedule_differs:
+                    notices.append("Payment schedules differ for %s / %s. Old: %s. New: %s. "
+                        "Ask your accountant to confirm this is intended; aging and collection use the new copy's schedule. "
+                        "The mover keeps that schedule and any existing payments unchanged." % (
+                            pair.source_move_id.display_name, pair.target_move_id.display_name,
+                            pair.source_payment_schedule, pair.target_payment_schedule))
+            if truncated:
+                notices.append("More than 100,000 destination invoices/bills exist; the draft/posted candidate scan is partial. Review the complete ledger before confirming existing data.")
         return notices
 
     def _adjust_existing_openings(self, opening):
@@ -272,5 +333,23 @@ class CopiedInvoice(models.Model):
 
     source_move_id = fields.Many2one("account.move", required=True, ondelete="restrict", string="Old invoice or bill")
     target_move_id = fields.Many2one("account.move", required=True, ondelete="restrict", string="Existing copy in new company")
+    source_payment_schedule = fields.Char(compute="_compute_payment_schedule", string="Old payment schedule",
+        help="Original installment amounts and due dates, before payments.")
+    target_payment_schedule = fields.Char(compute="_compute_payment_schedule", string="New payment schedule",
+        help="Original installment amounts and due dates, before payments. Existing payments stay recorded in the native copy.")
+    schedule_differs = fields.Boolean(compute="_compute_payment_schedule")
     _unique_source = models.Constraint("UNIQUE(cutover_id, source_move_id)", "Choose each old invoice/bill only once.")
     _unique_target = models.Constraint("UNIQUE(cutover_id, target_move_id)", "An existing invoice/bill can match only one old document.")
+
+    @api.depends("source_move_id", "target_move_id",
+        "source_move_id.line_ids.date_maturity", "source_move_id.line_ids.balance", "source_move_id.line_ids.amount_currency",
+        "source_move_id.line_ids.currency_id", "source_move_id.line_ids.account_id.account_type",
+        "target_move_id.line_ids.date_maturity", "target_move_id.line_ids.balance", "target_move_id.line_ids.amount_currency",
+        "target_move_id.line_ids.currency_id", "target_move_id.line_ids.account_id.account_type")
+    def _compute_payment_schedule(self):
+        for pair in self:
+            batch = pair.cutover_id
+            pair.source_payment_schedule = batch._payment_schedule_text(pair.source_move_id) if pair.source_move_id else False
+            pair.target_payment_schedule = batch._payment_schedule_text(pair.target_move_id) if pair.target_move_id else False
+            pair.schedule_differs = bool(pair.source_move_id and pair.target_move_id and
+                batch._payment_schedule(pair.source_move_id) != batch._payment_schedule(pair.target_move_id))

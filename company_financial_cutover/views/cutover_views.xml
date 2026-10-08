@@ -98,12 +98,17 @@
                             <field name="prior_opening_move_ids" widget="many2many_tags" readonly="state == 'done'" domain="[('company_id', '=', target_company_id), ('state', '=', 'posted'), ('move_type', '=', 'entry'), ('journal_id.type', '=', 'general'), ('date', '&lt;=', cutover_date)]" options="{'no_create': True}"/>
                         </group>
                         <p>If whole invoices or bills were already copied, match each old document to its existing copy. They are checked and skipped, preserving the native copy. Old invoices with payments at the balance date require a separate adjustment with your accountant.</p>
+                        <p>Review matching drafts before moving: cancel confirmed duplicate drafts, or post and match confirmed copies here. Posting an old copied draft afterwards would duplicate its balance. Separate new trading drafts can stay.</p>
                         <field name="copied_invoice_ids" readonly="state == 'done'" nolabel="1">
-                            <list editable="bottom">
+                            <list editable="bottom" decoration-warning="schedule_differs">
                                 <field name="source_move_id" domain="[('company_id', 'child_of', parent.source_company_id), ('state', '=', 'posted'), ('move_type', 'in', ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'])]" options="{'no_create': True}"/>
                                 <field name="target_move_id" domain="[('company_id', '=', parent.target_company_id), ('state', '=', 'posted'), ('move_type', 'in', ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'])]" options="{'no_create': True}"/>
+                                <field name="source_payment_schedule" optional="show"/>
+                                <field name="target_payment_schedule" optional="show"/>
+                                <field name="schedule_differs" column_invisible="True"/>
                             </list>
                         </field>
+                        <p class="text-muted">Payment schedules show original installments before payments. Differences appear together in Check results. Confirm intended changes with your accountant; the new copy keeps its due dates and existing payments.</p>
                         <group>
                             <field name="existing_data_reviewed" readonly="state == 'done'"/>
                         </group>

@@ -242,15 +242,28 @@ amounts before confirming **Accountant has reviewed existing data**:
   total, mapped accounts, contacts and both company/foreign amounts. The balanced
   source document is excluded from the opening; its native destination copy stays
   in place. Name/reference or amount similarity never automatically skips it.
+- **Payment schedules** show original installments before payments, including
+  amounts and due dates in both companies. Different due dates or installment
+  amounts appear together in **Check results**. Ask your accountant to confirm
+  intended changes: aging and collection follow the new copy's schedule. The
+  mover preserves that schedule and all existing payments.
+- **Possible draft invoice/bill copies** also appear in **Check results**. A draft
+  does not represent a posted opening and cannot be paired as a completed copy.
+  Before moving, cancel a confirmed duplicate draft or post it and explicitly
+  pair it with its original. Posting an old copied draft after moving can duplicate
+  its balance. Separate new trading drafts can stay; the mover never posts,
+  cancels or skips a draft automatically.
 - Everything else must be separate new destination activity. Similar invoice/bill
-  references are review notices; the scan is advisory and can miss manual imports
-  with changed references. Checking the complete ledger is necessary when the
+  references/numbers are review notices for draft and posted documents; the scan
+  is advisory and can miss manual imports with changed references. Checking the
+  complete ledger is necessary when the
   history is unknown. Confirming a checkbox cannot establish that data is new.
 
 The review shows **Already here → Carried opening → Earlier opening adjustment →
 After this move** for each affected account, using posted balances at the balance
 date. Later transactions remain in place outside those totals. Changes to these
-balances or selected records invalidate approval and require a refreshed preview.
+balances, selected records or matching draft/posted candidates invalidate approval
+and require a refreshed preview.
 All detected requirements appear in one check report; suspected duplicate source
 bills/orders are notices rather than a forced cleanup exercise.
 
