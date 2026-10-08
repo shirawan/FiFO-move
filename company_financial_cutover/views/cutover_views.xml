@@ -22,7 +22,7 @@
                     <button name="action_open_stock_mover" type="object" string="Open stock mover" class="oe_highlight" invisible="move_scope != 'stock' or not stock_mover_available"/>
                     <button name="action_match" type="object" string="1. Check existing data" class="oe_highlight" invisible="move_scope == 'stock' or state != 'draft' or check_status == 'ready'"/>
                     <button name="action_preview" type="object" string="2. Review selected data" class="oe_highlight" invisible="move_scope == 'stock' or state != 'draft' or check_status != 'ready'"/>
-                    <button name="action_apply" type="object" string="3. Move selected data" class="oe_highlight" invisible="not include_financial or state != 'preview'" confirm="Move the reviewed balances and any selected purchase history to the new company? Have your administrator verify the backup and pause accounting and purchase activity first. Stock moves separately."/>
+                    <button name="action_apply" type="object" string="3. Move selected data" class="oe_highlight" invisible="not include_financial or state != 'preview'" confirm="Move the reviewed balances and any selected purchase history to the new company? Have your administrator verify the backup and pause accounting and purchase activity first. Any selected earlier opening entries will receive posted reversals. Stock moves separately."/>
                     <button name="action_apply" type="object" string="3. Copy purchase history" class="oe_highlight" invisible="include_financial or not include_purchase_history or state != 'preview'" confirm="Copy the reviewed purchase orders as saved history? This creates no active orders, receipts or bills. Existing copies are skipped. Have your administrator verify the backup and pause activity first."/>
                     <button name="action_open_entry" type="object" string="View opening entry" class="oe_highlight" invisible="state != 'done' or not move_id"/>
                     <button name="action_download_move_report" type="object" string="Download completed report" invisible="state != 'done'"/>
@@ -77,7 +77,10 @@
                     <group string="Your move">
                         <group>
                             <field name="source_company_id" readonly="state == 'done'" options="{'no_create': True, 'no_open': True}"/>
+                            <field name="include_source_branches" readonly="state == 'done'" invisible="move_scope == 'stock'"/>
+                            <field name="source_scope_description" nolabel="1" colspan="2" invisible="move_scope == 'stock'"/>
                             <field name="target_company_id" readonly="state == 'done'" options="{'no_create': True, 'no_open': True}"/>
+                            <field name="destination_mode" readonly="state == 'done'" invisible="not include_financial"/>
                             <field name="cutover_date" readonly="state == 'done'" invisible="not include_financial"/>
                         </group>
                         <group>
@@ -87,6 +90,28 @@
                     </group>
                     <p class="text-muted" invisible="state == 'done' or not include_financial">Balances include posted items dated on or before the balance date.</p>
                     <p class="text-muted" invisible="state == 'done' or not include_purchase_history">Purchase history includes all orders at review time. Already copied orders are skipped.</p>
+                    <div class="mb-3" name="existing_data_review" invisible="not include_financial or destination_mode != 'existing'">
+                        <separator string="Existing data — review with your accountant"/>
+                        <p>New trading activity stays in the new company. Identify only data that was already transferred from the old company.</p>
+                        <p>Select earlier opening journal entries below. They remain available and receive opposite entries on the balance date before the complete opening is carried over. Related unpaid items are matched so they are not owed twice.</p>
+                        <group>
+                            <field name="prior_opening_move_ids" widget="many2many_tags" readonly="state == 'done'" domain="[('company_id', '=', target_company_id), ('state', '=', 'posted'), ('move_type', '=', 'entry'), ('journal_id.type', '=', 'general'), ('date', '&lt;=', cutover_date)]" options="{'no_create': True}"/>
+                        </group>
+                        <p>If whole invoices or bills were already copied, match each old document to its existing copy. They are checked and skipped, preserving the native copy. Old invoices with payments at the balance date require a separate adjustment with your accountant.</p>
+                        <field name="copied_invoice_ids" readonly="state == 'done'" nolabel="1">
+                            <list editable="bottom">
+                                <field name="source_move_id" domain="[('company_id', 'child_of', parent.source_company_id), ('state', '=', 'posted'), ('move_type', 'in', ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'])]" options="{'no_create': True}"/>
+                                <field name="target_move_id" domain="[('company_id', '=', parent.target_company_id), ('state', '=', 'posted'), ('move_type', 'in', ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'])]" options="{'no_create': True}"/>
+                            </list>
+                        </field>
+                        <group>
+                            <field name="existing_data_reviewed" readonly="state == 'done'"/>
+                        </group>
+                        <p class="text-muted">Confirm only after checking the full destination ledger: selected entries and matched documents account for all earlier transfers; everything else is new activity. Similar names or amounts cannot prove that two records are duplicates.</p>
+                        <group invisible="state != 'done' or not correction_move_ids">
+                            <field name="correction_move_ids" widget="many2many_tags"/>
+                        </group>
+                    </div>
                     <details class="mb-3" invisible="move_scope == 'stock'">
                         <summary>What moves, and what stays in the old company?</summary>
                         <p invisible="not include_financial">Financial balances and individual unpaid customer/vendor items become an opening entry in the new company.</p>
@@ -94,14 +119,16 @@
                         <p>Past invoices, bills, payments and tax reports stay available in the old company. Company settings are not copied.</p>
                         <p invisible="not include_financial">Finish bank reconciliation in the old company first. If you are also moving stock, move financial balances first and use the same stock clearing account in both tools.</p>
                     </details>
-                    <group string="Check results" col="1" invisible="not check_report">
+                    <div class="mb-3" name="move_check_results" invisible="not check_report">
+                        <separator string="Check results"/>
                         <field name="check_status" widget="badge" nolabel="1" invisible="state == 'done'"/>
                         <field name="check_report" nolabel="1"/>
-                    </group>
+                    </div>
                     <div invisible="state == 'draft'" class="mb-3">
                         <separator string="Review selected data"/>
                         <p invisible="not include_financial">Ask your accountant to check these amounts against the old company's balances and unpaid items. Inventory marked for the stock move is listed here but is handled separately.</p>
                         <field name="summary" string="Review summary" invisible="not summary"/>
+                        <field name="destination_balance_html" nolabel="1" invisible="not include_financial or destination_mode != 'existing'"/>
                         <field name="line_ids" nolabel="1" invisible="not include_financial">
                             <list create="0" edit="0" delete="0">
                                 <field name="sequence" column_invisible="True"/>

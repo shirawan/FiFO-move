@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from datetime import date
+import importlib.util
 from pathlib import Path
 
 from odoo import Command, api
@@ -11,6 +12,10 @@ from odoo.exceptions import ConcurrencyError, UserError
 assert env.cr.dbname.startswith("fifo_survival_tests_")
 mode = os.environ["FIFO_SURVIVAL_MODE"]
 fixture = Path(os.environ["FIFO_SURVIVAL_FIXTURE"])
+
+scenario_spec = importlib.util.spec_from_file_location('fifo_consolidation_scenario', str(Path(os.environ.get('FIFO_REPO_DIR', '/workspace/FiFO-move')) / 'tools/consolidation_scenario.py'))
+scenario_module = importlib.util.module_from_spec(scenario_spec)
+scenario_spec.loader.exec_module(scenario_module)
 
 if mode == "setup":
     source, target = env["res.company"].create([
@@ -72,8 +77,23 @@ if mode == "setup":
     history = purchases.purchase_history_ids
     history._choose_vendor(partner)
     history.action_prepare_draft()
-    archives = financial.archive_attachment_id | financial.report_attachment_id | purchases.archive_attachment_id | purchases.report_attachment_id
-    data = {"source": source.id, "target": target.id, "invoice": invoice.id,
+    consolidation = scenario_module.build_consolidation(env, 'Survival consolidation ')
+    extra = env(context={**env.context, 'allowed_company_ids': consolidation['companies']})
+    combined = extra['company.financial.cutover'].browse(consolidation['batch'])
+    combined.write({'existing_data_reviewed': True})
+    combined.action_match()
+    combined.action_preview()
+    combined.action_apply()
+    branch_original = extra['purchase.order'].browse(consolidation['branch_order'])
+    branch_original.button_cancel()
+    branch_history = combined.purchase_history_ids.filtered(lambda row: row.source_order_res_id == branch_original.id)
+    branch_history.action_prepare_draft()
+    consolidation.update({'opening': combined.move_id.id, 'corrections': combined.correction_move_ids.ids,
+        'archive_key': combined.archive_key, 'histories': [history.snapshot for history in combined.purchase_history_ids],
+        'replacement': branch_history.target_order_id.id})
+    scenario_module.verify_consolidation(env, consolidation, True)
+    archives = combined.archive_attachment_id | combined.report_attachment_id | financial.archive_attachment_id | financial.report_attachment_id | purchases.archive_attachment_id | purchases.report_attachment_id
+    data = {"consolidation": consolidation, "source": source.id, "target": target.id, "invoice": invoice.id,
         "opening": financial.move_id.id, "original": original.id, "replacement": history.target_order_id.id,
         "chosen_vendor": partner.id,
         "lines": len(financial.line_ids), "history_snapshot": history.snapshot,
@@ -81,7 +101,7 @@ if mode == "setup":
         "markers": {p.key: p.value for p in demo["ir.config_parameter"].sudo().search([
             ("key", "like", "company_financial_cutover.%")])},
         "archives": {str(a.id): hashlib.sha256(a.raw).hexdigest() for a in archives}}
-    assert len(archives) == 4 and financial.move_id.state == "posted" and history.target_order_id.state == "draft"
+    assert len(archives) == 6 and financial.move_id.state == "posted" and history.target_order_id.state == "draft"
     env.cr.commit()
     fixture.write_text(json.dumps(data, sort_keys=True))
     print("SURVIVAL: completed financial opening, purchase-only history and replacement draft created.")
@@ -137,6 +157,7 @@ elif mode == "approval_race":
 else:
     data = json.loads(fixture.read_text())
     demo = env(context={**env.context, "allowed_company_ids": [data["source"], data["target"]]})
+    scenario_module.verify_consolidation(env, data["consolidation"], mode == "restored")
     opening = demo["account.move"].browse(data["opening"]).exists()
     original = demo["purchase.order"].browse(data["original"]).exists()
     replacement = demo["purchase.order"].browse(data["replacement"]).exists()
@@ -162,7 +183,7 @@ else:
         print("SURVIVAL: with addon uninstalled AND code absent, native records, archives and duplicate markers survived unchanged.")
     elif mode == "restored":
         batches = demo["company.financial.cutover"].search([])
-        assert len(batches) == 2 and set(batches.mapped("state")) == {"done"}
+        assert len(batches) == 3 and set(batches.mapped("state")) == {"done"}
         financial = batches.filtered(lambda b: b.archive_key == data["financial_key"])
         purchases = batches.filtered(lambda b: b.archive_key == data["purchase_key"])
         assert financial.move_id == opening and len(financial.line_ids) == data["lines"]
@@ -171,10 +192,10 @@ else:
         assert len(history) == 1 and history.snapshot == data["history_snapshot"]
         assert history.target_order_id == replacement and replacement.financial_purchase_history_id == history
         assert history.replacement_vendor_id.id == data["chosen_vendor"]
-        assert len(demo["company.financial.purchase.history"].search([])) == 1
+        assert len(demo["company.financial.purchase.history"].search([])) == 4
         demo["company.financial.cutover"]._restore_archives()
-        assert demo["company.financial.cutover"].search_count([]) == 2
-        assert demo["company.financial.purchase.history"].search_count([]) == 1
+        assert demo["company.financial.cutover"].search_count([]) == 3
+        assert demo["company.financial.purchase.history"].search_count([]) == 4
         repeat = demo["company.financial.cutover"].create({
             "source_company_id": data["source"], "target_company_id": data["target"],
             "include_financial": False, "include_purchase_history": True})

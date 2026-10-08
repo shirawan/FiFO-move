@@ -7,7 +7,7 @@ FIFO_SURVIVAL_DB="fifo_survival_tests_$(date -u +%Y%m%d%H%M%S)_$$"
 FIFO_SURVIVAL_DIR="$FIFO_RUNTIME_DIR/$FIFO_SURVIVAL_DB"
 mkdir -p "$FIFO_SURVIVAL_DIR/addons"
 FIFO_SURVIVAL_FIXTURE="$FIFO_SURVIVAL_DIR/fixture.json"
-export FIFO_SURVIVAL_FIXTURE
+export FIFO_SURVIVAL_FIXTURE FIFO_REPO_DIR
 fifo_survival_sql() {
     "$FIFO_PG_BIN/psql" -h "$FIFO_RUNTIME_DIR/socket" -p 55432 -U agent -d postgres -At -v ON_ERROR_STOP=1 -c "$1"
 }

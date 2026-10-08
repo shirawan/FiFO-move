@@ -79,8 +79,8 @@ class FinancialCutover(models.Model):
             issues.append("Choose different old and new companies.")
         if not self.include_purchase_history:
             issues.append("Choose financial balances, purchase orders, or both. For stock only, use Open stock mover below.")
-        if any(c.sudo().parent_id or c.sudo().all_child_ids for c in (self.source_company_id, self.target_company_id)):
-            issues.append("Companies with branches need a separately reviewed move.")
+        if (self.source_company_id.sudo().all_child_ids and not self.include_source_branches) or self.target_company_id.sudo().parent_id or self.target_company_id.sudo().all_child_ids:
+            issues.append("Choose Include old branches to carry their branch balances together. The new company must be standalone.")
 
         self._raise_issues("Review these purchase-copy requirements together:", issues)
 
@@ -93,7 +93,7 @@ class FinancialCutover(models.Model):
         if not purchases:
             raise UserError("There are no new purchase orders to copy. Existing copies are skipped, so no duplicate history will be created.")
         evidence = [False, self.include_purchase_history, self.source_company_id.id,
-            self.target_company_id.id, purchases]
+            self.target_company_id.id, self._scope_evidence(), purchases]
         return [], hashlib.sha256(json.dumps(evidence, sort_keys=True, default=str).encode()).hexdigest(), 0
 
     def _check_purchase_only(self):

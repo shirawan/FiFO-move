@@ -6,3 +6,4 @@ access_financial_cutover_line,Financial reviewed amounts,model_company_financial
 access_purchase_history,Migrated purchase history,model_company_financial_purchase_history,purchase.group_purchase_user,1,0,0,0
 access_purchase_history_accounting,Migrated purchase history accountants,model_company_financial_purchase_history,account.group_account_manager,1,0,1,0
 access_purchase_vendor_choice,Choose replacement vendor,model_company_financial_purchase_vendor_choice,account.group_account_manager,1,1,1,1
+access_copied_invoice,Already copied invoices,model_company_financial_copied_invoice,account.group_account_manager,1,1,1,1

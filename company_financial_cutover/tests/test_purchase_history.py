@@ -294,9 +294,9 @@ class TestPurchaseMigration(PurchaseMigrationCase):
         rendered = html.fromstring(batch.purchase_preview_html)
         self.assertFalse(rendered.xpath("//script|//img"))
         rows = rendered.xpath("//tbody/tr")
-        by_order = {row.xpath("./td/text()")[0]: row.xpath("./td/text()") for row in rows}
-        self.assertEqual(by_order[first.name][2], "Confirmed order")
-        self.assertEqual(by_order[second.name][2], "Cancelled")
+        by_order = {row.xpath("./td/text()")[1]: row.xpath("./td/text()") for row in rows}
+        self.assertEqual(by_order[first.name][3], "Confirmed order")
+        self.assertEqual(by_order[second.name][3], "Cancelled")
         self.assertTrue(by_order[first.name][-1].endswith(self.source.currency_id.name))
         self.assertTrue(by_order[second.name][-1].endswith("EUR"))
 

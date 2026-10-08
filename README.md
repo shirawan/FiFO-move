@@ -6,7 +6,7 @@ in the same database.
 - `company_stock_fifo_migration`: Company Stock Cutover 19.0.2.7.7, based on the supplied
   19.0.2.7.3 addon, with a clearer existing-stock preview. Requires Odoo Enterprise `stock_accountant`,
   `product_expiry`, and the separate `company_kit_bom_migration` addon.
-- `company_financial_cutover` 19.0.1.5.0: financial opening balances and unpaid
+- `company_financial_cutover` 19.0.2.0.0: financial opening balances and unpaid
   customer/vendor journal items, plus all purchase orders as read-only destination
   history with explicit draft preparation for eligible unfinished orders. Requires
   Odoo 19 `account` and `purchase`. It uses the new
@@ -18,6 +18,20 @@ only the setup for the chosen option. Purchase-only moves work with an existing
 destination ledger and create no accounting entries. Choosing stock opens its
 separate wizard when installed; sales and other historical documents stay in
 the old company.
+
+For old Company A with branches B and C, select A and **Include old branches**.
+Their accounting and purchase history are combined into the standalone destination;
+unpaid items and purchase histories retain their original company. Archived
+branches are included and every included company must be selected in the switcher.
+
+If the new company already has a mixture of activity, choose **New company is
+already in use**. Review earlier imported openings and explicitly match any copied
+invoices/bills with your accountant. The preview shows balances already there,
+the carried opening, adjustments and resulting balances. New trading stays in
+place. Selected earlier openings receive posted reversals, with existing payment
+matches preserved. The mover cannot guess which transactions were previously
+transferred. Copied source invoices with payments at the balance date and
+foreign-currency earlier openings need a separate reviewed adjustment.
 
 Completed native accounting entries and prepared purchase orders remain after
 uninstalling the financial addon. Private native attachments preserve completed
@@ -56,7 +70,9 @@ preview presentation can be checked separately with the runtime Python using
 `python -m unittest discover -s tests -v` (requires `lxml`).
 
 The retention test creates a separate local database, completes financial and
-purchase-only moves, runs native Odoo uninstall, removes only its isolated addon
+purchase-only moves, including A with branches B/C into an already-used standalone
+company with an earlier opening, existing payment, copied invoice and new activity.
+It runs native Odoo uninstall, removes only its isolated addon
 symlink, then verifies native data and archives before reinstalling. It checks
 that recovery and repeat attempts create no duplicates. It keeps its test
 database and logs outside the repository for inspection.

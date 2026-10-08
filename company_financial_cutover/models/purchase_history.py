@@ -41,7 +41,7 @@ def purchase_draft_advice(snapshot, env):
 
 
 def purchase_duplicate_signature(row, identity):
-    return (row["vendor_id"], identity(row["vendor_ref"], True), row["currency_id"], row["date_order"][:10],
+    return (row.get("company_id"), row["vendor_id"], identity(row["vendor_ref"], True), row["currency_id"], row["date_order"][:10],
         tuple((line["product_id"], line["qty"], line["uom_id"], line["price"], line["discount"])
             for line in row["lines"] if not line["display_type"]))
 
@@ -62,7 +62,7 @@ class FinancialCutover(models.Model):
 
     def _purchase_row(self, order):
         return {
-            "id": order.id, "name": order.name, "vendor_id": order.partner_id.id,
+            "id": order.id, "company_id": order.company_id.id, "company_name": order.company_id.name, "name": order.name, "vendor_id": order.partner_id.id,
             "vendor": order.partner_id.display_name, "vendor_ref": order.partner_ref or "",
             "state": order.state, "locked": order.locked, "date_order": str(order.date_order),
             "date_approve": str(order.date_approve or ""), "currency_id": order.currency_id.id,
@@ -88,15 +88,15 @@ class FinancialCutover(models.Model):
         if not self.env.user.has_group("purchase.group_purchase_user"):
             raise AccessError("Purchase user access is also required when including purchase orders.")
         orders = self.env["purchase.order"].with_company(self.source_company_id).search([
-            ("company_id", "=", self.source_company_id.id)], order="id", limit=MAX_PURCHASE_ORDERS + 1)
+            ("company_id", "in", self._source_companies().ids)], order="id", limit=MAX_PURCHASE_ORDERS + 1)
         if len(orders) > MAX_PURCHASE_ORDERS or len(orders.order_line) > MAX_PURCHASE_LINES:
             raise UserError("Purchase migration is limited to 10,000 orders and 50,000 lines per cutover.")
         existing = self.env["company.financial.purchase.history"].sudo().search([
-            ("company_id", "=", self.target_company_id.id), ("source_company_id", "=", self.source_company_id.id),
+            ("company_id", "=", self.target_company_id.id), ("source_company_id", "in", self._source_companies().ids),
             ("source_order_res_id", "in", orders.ids)])
         from .retention import purchase_marker_key
         markers = self.env["ir.config_parameter"].sudo().search([
-            ("key", "in", [purchase_marker_key(self.source_company_id.id, order.id) for order in orders])])
+            ("key", "in", [purchase_marker_key(order.company_id.id, order.id) for order in orders])])
         copied = set(existing.mapped("source_order_res_id"))
         issues = []
         for parameter in markers:
@@ -105,8 +105,8 @@ class FinancialCutover(models.Model):
             except UserError as exc:
                 issues.append(str(exc))
                 continue
-            if (marker.get("source_company_id") != self.source_company_id.id
-                or parameter.key != purchase_marker_key(self.source_company_id.id, marker.get("source_order_id"))):
+            if (marker.get("source_company_id") not in self._source_companies().ids
+                or parameter.key != purchase_marker_key(marker.get("source_company_id"), marker.get("source_order_id"))):
                 issues.append("A purchase migration marker does not match its source order. Ask your administrator to recover it; no duplicate will be created.")
             if marker["target_company_id"] != self.target_company_id.id:
                 issues.append("Some purchase orders already moved to another company. Ask your administrator to review the saved migration archive; another copy will not be created.")
@@ -122,7 +122,7 @@ class FinancialCutover(models.Model):
         if not self.include_purchase_history or not self.env.user.has_group("purchase.group_purchase_user"):
             return notices
         orders = self.env["purchase.order"].with_company(self.source_company_id).search([
-            ("company_id", "=", self.source_company_id.id)], order="id", limit=MAX_PURCHASE_ORDERS + 1)
+            ("company_id", "in", self._source_companies().ids)], order="id", limit=MAX_PURCHASE_ORDERS + 1)
         if len(orders) > MAX_PURCHASE_ORDERS or len(orders.order_line) > MAX_PURCHASE_LINES:
             return notices
         seen = {}
@@ -142,11 +142,11 @@ class FinancialCutover(models.Model):
         if not self.env.user.has_group("purchase.group_purchase_user"):
             raise AccessError("Purchase user access is required when including purchase orders.")
         orders = self.env["purchase.order"].with_company(self.source_company_id).search([
-            ("company_id", "=", self.source_company_id.id)], limit=MAX_PURCHASE_ORDERS + 1)
+            ("company_id", "in", self._source_companies().ids)], limit=MAX_PURCHASE_ORDERS + 1)
         if len(orders) > MAX_PURCHASE_ORDERS:
             raise UserError("Purchase migration is limited to 10,000 orders per cutover.")
         copied = set(self.env["company.financial.purchase.history"].sudo().search([
-            ("company_id", "=", self.target_company_id.id), ("source_company_id", "=", self.source_company_id.id),
+            ("company_id", "=", self.target_company_id.id), ("source_company_id", "in", self._source_companies().ids),
             ("source_order_res_id", "in", orders.ids)]).mapped("source_order_res_id"))
         # Vendor choices are needed only for new history that can produce a
         # replacement. Already copied, cancelled and received/billed history
@@ -181,12 +181,12 @@ class FinancialCutover(models.Model):
         for batch in self:
             rows = batch.purchase_preview_data or []
             body = "".join("<tr>" + "".join("<td>%s</td>" % escape(str(value)) for value in (
-                row["name"], row["vendor"], purchase_status_label(row["state"], batch.env), len(row["lines"]),
+                row.get("company_name", batch.source_company_id.name), row["name"], row["vendor"], purchase_status_label(row["state"], batch.env), len(row["lines"]),
                 "%s %s" % (format(row["total"], ".%sf" % row.get("currency_decimals", 2)),
                     self.env["res.currency"].browse(row["currency_id"]).name))) + "</tr>" for row in rows)
             batch.purchase_preview_html = ("<p>All source purchase orders at preview time, including historical and cancelled orders. "
                 "This is a read-only history copy. No order is confirmed, no receipt is created, and no vendor bill is recreated.</p>"
-                "<div class='table-responsive'><table class='table table-sm'><thead><tr><th scope='col'>Order</th><th scope='col'>Vendor</th><th scope='col'>Original status</th><th scope='col'>Lines</th><th scope='col'>Order total</th>"
+                "<div class='table-responsive'><table class='table table-sm'><thead><tr><th scope='col'>Old company</th><th scope='col'>Order</th><th scope='col'>Vendor</th><th scope='col'>Original status</th><th scope='col'>Lines</th><th scope='col'>Order total</th>"
                 "</tr></thead><tbody>" + body + "</tbody></table></div>") if rows else (
                     "<p>No new purchase orders to copy. Already copied orders are skipped; earlier copies remain under Purchase → Migrated purchase history.</p>" if batch.purchase_preview_data is not False
                     else "<p>Click 2. Review selected data to see the purchase orders that will be copied.</p>")
@@ -200,7 +200,8 @@ class FinancialCutover(models.Model):
     def _create_purchase_history(self, rows):
         return self.env["company.financial.purchase.history"]._system_create([
                 {"cutover_id": self.id, "source_order_res_id": row["id"], "name": row["name"],
-                    "source_company_name": self.source_company_id.name,
+                    "source_company_id": row.get("company_id", self.source_company_id.id),
+                    "source_company_name": row.get("company_name", self.source_company_id.name),
                     "vendor_name": row["vendor"], "original_state": row["state"], "order_date": row["date_order"],
                     "currency_id": row["currency_id"], "amount_total": row["total"], "snapshot": row}
                 for row in rows])
@@ -239,7 +240,7 @@ class PurchaseHistory(models.Model):
 
     cutover_id = fields.Many2one("company.financial.cutover", required=True, readonly=True, ondelete="restrict")
     company_id = fields.Many2one(related="cutover_id.target_company_id", store=True)
-    source_company_id = fields.Many2one(related="cutover_id.source_company_id", store=True, string="Source company identifier")
+    source_company_id = fields.Many2one("res.company", required=True, ondelete="restrict", string="Original company")
     source_company_name = fields.Char(string="Old company", readonly=True)
     source_order_res_id = fields.Integer(required=True, readonly=True)
     name = fields.Char(required=True, readonly=True)
@@ -411,7 +412,7 @@ class PurchaseHistory(models.Model):
             return []
         batch = self.cutover_id
         others = self.env["purchase.order"].with_company(batch.source_company_id).search([
-            ("company_id", "=", batch.source_company_id.id), ("partner_id", "=", snapshot["vendor_id"]),
+            ("company_id", "=", snapshot.get("company_id", batch.source_company_id.id)), ("partner_id", "=", snapshot["vendor_id"]),
             ("state", "!=", "cancel"), ("id", "!=", self.source_order_res_id)])
         signature = purchase_duplicate_signature(snapshot, batch._identity)
         duplicates = [order.name for order in others if purchase_draft_advice(batch._purchase_row(order), self.env)[0]
@@ -422,7 +423,7 @@ class PurchaseHistory(models.Model):
     def _replacement_destination_issues(self, vendor):
         if len(vendor) != 1 or not vendor.active or vendor.company_id not in (self.env["res.company"], self.company_id):
             return []
-        origin = "Migrated purchase %s/%s" % (self.cutover_id.source_company_id.id, self.source_order_res_id)
+        origin = "Migrated purchase %s/%s" % (self.source_company_id.id, self.source_order_res_id)
         domain = [("company_id", "=", self.company_id.id), ("partner_id", "=", vendor.id), ("state", "!=", "cancel")]
         candidates = self.env["purchase.order"].search([*domain, ("origin", "=", origin)])
         if self.snapshot["vendor_ref"]:
@@ -465,7 +466,7 @@ class PurchaseHistory(models.Model):
                 or matches.company_id not in (self.env["res.company"], self.company_id)
                 or not explicit and not batch._contact_compatible(vendor, matches)):
                 issues.append("Use Choose destination vendor to select the correct existing contact first. Name alone is not enough for automatic matching.")
-            origin = "Migrated purchase %s/%s" % (batch.source_company_id.id, self.source_order_res_id)
+            origin = "Migrated purchase %s/%s" % (self.source_company_id.id, self.source_order_res_id)
             if valid_vendor:
                 issues.extend(self._replacement_destination_issues(matches))
             commands, product_issues = self._draft_product_commands()

@@ -41,7 +41,10 @@ next stock step.
    List and search for **Company Financial Cutover** with the Apps filter removed. Odoo installs its `account` and `purchase` dependencies.
 2. For financial balances, configure the replacement company's chart, journals and fiscal year correctly.
    Both companies must use the same accounting currency and fiscal year start.
-   The destination must have **no draft or posted accounting entries, and no active payments**. Take a verified
+   Choose whether the replacement has no accounting yet or is already in use.
+   In fresh-company mode, it must have **no draft or posted accounting entries,
+   and no active payments**. For an existing company, review earlier transfers
+   as described below. Take a verified
    database backup and use a restored test copy before the actual cutover.
 3. Sign in as a Settings administrator with Accounting administrator access and
    enable both companies. Open **Accounting/Invoicing → Configuration → Move
@@ -155,7 +158,7 @@ ledger accounts and fully settled contacts need no destination choice. An unused
 earnings or stock-clearing setting does not block the opening; these accounts
 are validated only when their amounts actually appear in it.
 
-Essential checks still prevent unsafe posting: existing destination accounting,
+Essential checks still prevent unsafe posting: unreviewed existing destination accounting,
 invalid account/contact choices for amounts being moved, unbalanced entries,
 unsettled bank-matching items, unsupported cash-basis tax obligations, changed
 previews, and repeated financial moves. Replacement preparation collects known
@@ -218,17 +221,70 @@ purchase has been reopened while an active replacement exists. Financial and
 purchase archives restore automatically on reinstall; stock audit archives
 remain readable files, with no automatic stock-wizard reconstruction.
 
+## Old company with branches; new company already in use
+
+Select the old parent company and **Include old branches**. Select the standalone
+new company. Choose **New company is already in use** when its books already
+contain activity. Existing destination data alone is not a reason to clean it up.
+
+Under **Existing data**, your accountant identifies all previously transferred
+amounts before confirming **Accountant has reviewed existing data**:
+
+- **Old opening entries already entered here**: select only posted general-journal
+  entries that imported the old balances. Preview shows their opposite amounts.
+  On confirmation, native Odoo posts reversals at the balance date and carries the
+  complete source opening. Originals and new trading remain posted. Existing
+  customer/vendor payment matches are preserved; remaining reversal items offset
+  the carried opening. For example, an earlier 100 opening already paid by 40
+  becomes a carried unpaid amount of 60, rather than another 100 to collect.
+- **Invoices and bills already copied here**: explicitly pair each old document
+  with its existing destination copy. The mover verifies type, dates, currency,
+  total, mapped accounts, contacts and both company/foreign amounts. The balanced
+  source document is excluded from the opening; its native destination copy stays
+  in place. Name/reference or amount similarity never automatically skips it.
+- Everything else must be separate new destination activity. Similar invoice/bill
+  references are review notices; the scan is advisory and can miss manual imports
+  with changed references. Checking the complete ledger is necessary when the
+  history is unknown. Confirming a checkbox cannot establish that data is new.
+
+The review shows **Already here → Carried opening → Earlier opening adjustment →
+After this move** for each affected account, using posted balances at the balance
+date. Later transactions remain in place outside those totals. Changes to these
+balances or selected records invalidate approval and require a refreshed preview.
+All detected requirements appear in one check report; suspected duplicate source
+bills/orders are notices rather than a forced cleanup exercise.
+
+Earlier opening adjustments support the accounting currency. Foreign-currency
+previous openings and copied source invoices already paid at the balance date
+need a separate accountant-reviewed adjustment: copying/skipping an invoice alone
+would lose the effect of its old payment. Payment, tax and already-reversed entries
+cannot be selected as earlier openings. Books locked at the balance date need an
+accountant-approved posting date. Unsettled bank-matching items and unsupported
+cash-basis tax obligations retain their safeguards.
+
+Posted reversals, reviewed choices, exact completed branch scope, before/after
+balances and original branch purchase identifiers are included in the durable
+archive. Uninstall preserves native entries and archives; reinstall validates
+native openings/adjustments and restores links without reposting them.
+
 ## Boundaries
 
-- Choose standalone companies. Companies or branches in a branch hierarchy need a separately reviewed cutover, so branch balances are never silently omitted.
+- The destination must be standalone. Select **Include old branches** to combine
+  the source parent and all descendants, including archived branches. Enable every
+  included company in the switcher. Branch accounting currencies and financial
+  year boundaries must agree. The preview lists included companies, retains the
+  branch on unpaid items and purchase histories, and snapshots the scope. Each
+  included company receives a durable completion marker so later overlapping
+  parent/branch cutovers cannot repeat. Intercompany eliminations are not guessed.
 
 - This transfers opening balances and open items, rather than repairing source
   ledger errors or migrating full accounting history. Source posted entries must
   balance. Existing source/target configuration errors and ambiguous mappings
-  need review before posting. The destination is a new ledger, not a merger into
-  an already active ledger.
+  need review before posting. **New company has no accounting yet** keeps the
+  fresh-ledger safeguard. **New company is already in use** allows posted entries,
+  drafts and payments; it requires an explicit review of earlier transfers.
 - Committed inserts, updates or deletes in the locked accounting/configuration and selected purchase tables before lock acquisition trigger a full Odoo request retry with a fresh snapshot using `ConcurrencyError`. The guard compares actual tuple versions in this database, including deleted rows, and ignores the current request's own uncommitted changes. Commits in other PostgreSQL databases, transactions without changes to these tables, and ordinary automatic vacuum no longer trigger retries. These locks still cover the selected tables across companies in this database. Odoo retries at most five times; pause accounting and purchase writes during the move window.
-- Draft entries, unposted payments, archived contacts and contacts added after preview are checked before posting. A source completion marker also prevents repeating a move to a different replacement company or after reinstalling the addon. Possible duplicates among proposed new contacts need manual resolution.
+- In fresh-ledger mode, destination draft entries and unposted payments block posting. Archived contacts and contacts added after preview are checked before posting. A source completion marker also prevents repeating a move to a different replacement company or after reinstalling the addon. Possible duplicates among proposed new contacts need manual resolution.
 - Rebuild the preview after changing source entries, reconciliations, contacts,
   account choices, currency precision or destination configuration. Completed
   cutovers cannot repeat or be edited, deleted, or reset to draft. Post corrections

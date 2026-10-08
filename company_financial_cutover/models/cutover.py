@@ -52,12 +52,12 @@ class FinancialCutover(models.Model):
                 and self.env.user.has_group("account.group_account_manager")):
             raise AccessError("A Settings administrator with Accounting administrator access must run this cutover.")
         for batch in self:
-            if not (batch.source_company_id | batch.target_company_id) <= self.env.companies:
-                raise AccessError("Enable both the source and destination companies in the company switcher.")
+            if not (batch._source_companies() | batch.target_company_id) <= self.env.companies:
+                raise AccessError("Enable the old company, every included branch and the new company in the company switcher.")
 
     @api.model_create_multi
     def create(self, vals_list):
-        protected = {"name", "state", "snapshot_hash", "move_id", "completed_at", "completed_by", "summary", "line_ids", "check_status", "check_report", "purchase_preview_data", "purchase_history_ids", "purchase_history_preview_ready", "archive_key", "archive_attachment_id", "report_attachment_id"}
+        protected = {"name", "state", "snapshot_hash", "move_id", "completed_at", "completed_by", "summary", "line_ids", "check_status", "check_report", "purchase_preview_data", "purchase_history_ids", "purchase_history_preview_ready", "archive_key", "archive_attachment_id", "report_attachment_id", "completed_source_ids", "correction_move_ids", "destination_balance_preview"}
         if any(protected.intersection(vals) for vals in vals_list):
             raise AccessError("Cutover audit fields are system-managed.")
         records = super().create(vals_list)
@@ -79,7 +79,7 @@ class FinancialCutover(models.Model):
 
     def write(self, vals):
         self._operator()
-        protected = {"name", "state", "snapshot_hash", "move_id", "completed_at", "completed_by", "summary", "line_ids", "check_status", "check_report", "purchase_preview_data", "purchase_history_ids", "purchase_history_preview_ready", "archive_key", "archive_attachment_id", "report_attachment_id"}
+        protected = {"name", "state", "snapshot_hash", "move_id", "completed_at", "completed_by", "summary", "line_ids", "check_status", "check_report", "purchase_preview_data", "purchase_history_ids", "purchase_history_preview_ready", "archive_key", "archive_attachment_id", "report_attachment_id", "completed_source_ids", "correction_move_ids", "destination_balance_preview"}
         if protected.intersection(vals):
             raise AccessError("Cutover audit fields are system-managed.")
         self._invalidate_preview()
@@ -138,21 +138,20 @@ class FinancialCutover(models.Model):
             issues.append("This cutover is already completed.")
         if source == target or source.currency_id != target.currency_id:
             issues.append("Choose different companies with the same accounting currency.")
-        if any(company.sudo().parent_id or company.sudo().all_child_ids for company in (source, target)):
-            issues.append("Companies with branches need a separately reviewed cutover. "
-                "This mover handles standalone companies; branch balances are not included automatically.")
+        if (source.sudo().all_child_ids and not self.include_source_branches) or target.sudo().parent_id or target.sudo().all_child_ids:
+            issues.append("Choose Include old branches to carry their branch balances together. The new company must be standalone.")
         if self.cutover_date > fields.Date.context_today(self):
             issues.append("The cutover date cannot be in the future.")
         # Check across all previous destinations, including companies hidden by
         # the current switcher. Reveal only that this accessible source moved.
         if (self.sudo().search_count([("source_company_id", "=", source.id), ("state", "=", "done"), ("include_financial", "=", True)])
-            or self.env["ir.config_parameter"].sudo().search_count([("key", "=", self._completion_key())])):
+            or self.env["ir.config_parameter"].sudo().search_count([("key", "in", self._completion_keys())])):
             issues.append("This source company already has a completed financial cutover.")
         posted = self.env["account.move"].search_count([("company_id", "=", target.id), ("state", "=", "posted")])
         drafts = self.env["account.move"].search_count([("company_id", "=", target.id), ("state", "=", "draft")])
         payments = self.env["account.payment"].search_count([("company_id", "=", target.id),
             ("state", "not in", ["canceled", "rejected"])])
-        if posted or drafts or payments:
+        if (posted or drafts or payments) and self.destination_mode == "fresh":
             issues.append("The destination already has posted entries: %s; draft entries: %s; payments: %s. "
                 "Review these existing transactions with your accountant. Use a fresh destination to avoid duplicate balances."
                 % (posted, drafts, payments))
@@ -207,7 +206,7 @@ class FinancialCutover(models.Model):
 
     def _source_lines(self):
         lines = self.env["account.move.line"].with_company(self.source_company_id).search([
-            ("company_id", "=", self.source_company_id.id),
+            ("company_id", "in", self._source_companies().ids),
             ("parent_state", "=", "posted"), ("date", "<=", self.cutover_date),
             ("display_type", "not in", ["line_section", "line_subsection", "line_note"]),
         ], order="id", limit=MAX_SOURCE_LINES + 1)
@@ -251,10 +250,11 @@ class FinancialCutover(models.Model):
         Account = self.env["account.account"].with_company(self.target_company_id)
         account_domain = Account._check_company_domain(self.target_company_id)
         inventory_accounts = self.env["account.account"]
-        if "account_stock_valuation_id" in self.source_company_id._fields:
-            inventory_accounts |= self.source_company_id.account_stock_valuation_id
-        if "property_stock_valuation_account_id" in self.env["product.category"]._fields:
-            inventory_accounts |= self.env["product.category"].with_company(self.source_company_id).search([]).mapped("property_stock_valuation_account_id")
+        for company in self._source_companies():
+            if "account_stock_valuation_id" in company._fields:
+                inventory_accounts |= company.account_stock_valuation_id
+            if "property_stock_valuation_account_id" in self.env["product.category"]._fields:
+                inventory_accounts |= self.env["product.category"].with_company(company).search([]).mapped("property_stock_valuation_account_id")
         existing = set(self.mapping_ids.source_account_id.ids)
         for account in lines.account_id.sorted("id"):
             if account.id in existing:
@@ -376,17 +376,22 @@ class FinancialCutover(models.Model):
         )
 
     def _bank_settlement_issues(self, lines):
+        return [issue for company in self._source_companies()
+            for issue in self._company_bank_settlement_issues(company, lines.filtered(lambda line: line.company_id == company))]
+
+    def _company_bank_settlement_issues(self, source, lines):
         """Aggregated ledger balances cannot replace outstanding payment items."""
-        source = self.source_company_id
+        settings_companies = source | source.root_id
         journals = self.env["account.journal"].with_company(source).search([
-            ("company_id", "=", source.id), ("type", "in", ["bank", "cash"])])
+            ("company_id", "in", settings_companies.ids), ("type", "in", ["bank", "cash"])])
         accounts = (journals.inbound_payment_method_line_ids.payment_account_id
             | journals.outbound_payment_method_line_ids.payment_account_id | journals.suspense_account_id
-            | source.account_journal_suspense_account_id | source.transfer_account_id
+            | settings_companies.account_journal_suspense_account_id | settings_companies.transfer_account_id
             | lines.move_id.origin_payment_id.outstanding_account_id)
-        template = self.env["account.chart.template"].with_company(source).with_context(allowed_company_ids=source.ids)
-        for key in ("account_journal_payment_debit_account_id", "account_journal_payment_credit_account_id"):
-            accounts |= template.ref(key, raise_if_not_found=False) or self.env["account.account"]
+        for company in settings_companies:
+            template = self.env["account.chart.template"].with_company(company).with_context(allowed_company_ids=company.ids)
+            for key in ("account_journal_payment_debit_account_id", "account_journal_payment_credit_account_id"):
+                accounts |= template.ref(key, raise_if_not_found=False) or self.env["account.account"]
         accounts = accounts.filtered(lambda a: a.account_type not in OPEN_ITEM_TYPES | {"asset_cash"})
         issues = []
         for line in lines.filtered(lambda l: l.account_id in accounts):
@@ -424,6 +429,7 @@ class FinancialCutover(models.Model):
             issues.append(str(exc))
             self._raise_issues("Review these move requirements together:", issues)
         issues.extend(self._bank_settlement_issues(lines))
+        lines = self._lines_to_move(lines)
         mappings = {m.source_account_id.id: m for m in self.mapping_ids}
         partners = {m.source_partner_id.id: m for m in self.partner_mapping_ids}
         grouped = defaultdict(lambda: [0.0, 0.0])
@@ -438,7 +444,7 @@ class FinancialCutover(models.Model):
             account = line.account_id
             currency = line.currency_id
             source_evidence.append([
-                line.id, str(line.write_date), line.account_id.id, line.partner_id.id,
+                line.id, line.company_id.id, str(line.write_date), line.account_id.id, line.partner_id.id,
                 str(line.date), str(line.date_maturity), line.name, line.move_id.name, line.move_id.ref,
                 line.balance, line.amount_currency, currency.id,
                 [(p.id, p.amount, p.debit_amount_currency, p.credit_amount_currency, str(p.max_date))
@@ -483,7 +489,7 @@ class FinancialCutover(models.Model):
                     "target_partner_id": mapping.target_partner_id.id,
                     "currency_id": currency.id, "balance": balance, "amount_currency": amount_currency,
                     "date_maturity": str(line.date_maturity or line.date),
-                    "label": " | ".join(filter(None, [line.move_id.name, line.move_id.ref, line.name or line.partner_id.name])), "kind": "open_item",
+                    "label": " | ".join(filter(None, [line.company_id.name if self.include_source_branches else False, line.move_id.name, line.move_id.ref, line.name or line.partner_id.name])), "kind": "open_item",
                 })
             elif account.account_type in PROFIT_TYPES and line.date < fiscal_start:
                 previous_profit += line.balance
@@ -551,14 +557,16 @@ class FinancialCutover(models.Model):
                 "balance": excluded, "amount_currency": excluded,
                 "label": "Inventory carried separately by stock cutover", "kind": "stock_clearing"})
         included = [row for row in rows if row["kind"] != "stock_excluded"]
-        if not issues and (not included or len(included) > MAX_OPENING_LINES):
+        if not issues and not included and self.copied_invoice_ids:
+            issues.append("All selected financial data is already present in the matched destination documents. No additional financial opening is needed. Choose Purchase orders if you still need to copy purchase history.")
+        elif not issues and (not included or len(included) > MAX_OPENING_LINES):
             issues.append("The preview must contain between 1 and 10,000 destination journal items.")
         if not issues and not self.currency_id.is_zero(sum(row["balance"] for row in included)):
             issues.append("The generated opening does not balance. No rounding or write-off line is added to hide differences.")
         self._raise_issues("Review these move requirements together:", issues)
         evidence = {
             "companies": [self._signature(c, ("name", "currency_id", "parent_id", "fiscalyear_last_day", "fiscalyear_last_month", "account_fiscal_country_id"))
-                for c in (self.source_company_id | self.target_company_id)],
+                for c in (self._source_companies() | self.target_company_id)],
             "currencies": [self._signature(c, ("rounding", "active")) for c in lines.currency_id],
             "date": str(self.cutover_date), "fiscal_start": str(fiscal_start),
             "journal": self._signature(self.journal_id, ("name", "code", "type", "company_id", "currency_id", "active", "restrict_mode_hash_table", "account_control_ids")),
@@ -606,7 +614,7 @@ class FinancialCutover(models.Model):
         except LockNotAvailable as exc:
             raise UserError("Accounting is busy. Stop accounting activity and retry during the cutover maintenance window.") from exc
         self._assert_fresh_snapshot(snapshot)
-        companies = self.source_company_id | self.target_company_id
+        companies = self._source_companies() | self.target_company_id
         companies.check_access("write")
         # Odoo uses repeatable-read transactions. A real row update forces a
         # concurrent stale request to retry rather than reuse an old snapshot.
@@ -734,11 +742,13 @@ class FinancialCutover(models.Model):
                         or not currency.is_zero(line.amount_residual_currency - row["amount_currency"])) )):
                     raise UserError("A native opening amount, unpaid item, currency, account, partner or due date did not reconcile.")
                 review._system_write({"posted_line_id": line.id, "target_partner_id": line.partner_id.id})
+            self._adjust_existing_openings(move)
             self._system_write({"state": "done", "move_id": move.id,
                 "completed_at": fields.Datetime.now(), "completed_by": self.env.user.id})
             # No external ID: retain the completion marker across addon reinstall.
-            self.env["ir.config_parameter"].sudo().set_param(self._completion_key(), json.dumps({
-                "move_id": move.id, "cutover_id": self.id, "date": str(self.cutover_date)}))
+            for key in self._completion_keys():
+                self.env["ir.config_parameter"].sudo().set_param(key, json.dumps({
+                    "move_id": move.id, "cutover_id": self.id, "date": str(self.cutover_date)}))
         return {"type": "ir.actions.act_window", "name": "Completed company move",
             "res_model": self._name, "res_id": self.id, "view_mode": "form"}
 
