@@ -9,8 +9,7 @@ from odoo.tests import tagged, new_test_user
 from .test_cutover import FinancialCutoverCase
 
 
-@tagged("post_install", "-at_install")
-class TestPurchaseMigration(FinancialCutoverCase):
+class PurchaseMigrationCase(FinancialCutoverCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
@@ -34,6 +33,9 @@ class TestPurchaseMigration(FinancialCutoverCase):
             order.order_line.qty_received_manual = received
         return order
 
+
+@tagged("post_install", "-at_install")
+class TestPurchaseMigration(PurchaseMigrationCase):
     def test_all_order_states_copy_without_creating_orders_or_bills(self):
         self._invoice()
         draft = self._order()
@@ -100,6 +102,10 @@ class TestPurchaseMigration(FinancialCutoverCase):
         history = self._run().purchase_history_ids
         self.assertTrue(history.draft_eligible)
         self.assertEqual(history.original_status_label, "Confirmed order")
+        with self.assertRaisesRegex(UserError, "Cancel the original order"):
+            history.action_prepare_draft()
+        self.assertFalse(history.target_order_id)
+        original.button_cancel()
         history.action_prepare_draft()
         replacement = history.target_order_id
         self.assertFalse(history.draft_eligible)
@@ -107,10 +113,11 @@ class TestPurchaseMigration(FinancialCutoverCase):
         self.assertEqual(replacement.state, "draft")
         self.assertEqual(replacement.company_id, self.target)
         self.assertEqual(replacement.order_line.product_qty, 5)
-        self.assertEqual(original.state, "purchase")
+        self.assertEqual(original.state, "cancel")
         history.action_prepare_draft()
         self.assertEqual(history.target_order_id, replacement)
         self.assertEqual(self.env["purchase.order"].search_count([("company_id", "=", self.target.id)]), 1)
+        original.button_draft()
         with self.assertRaisesRegex(UserError, "Cancel the original order"):
             replacement.button_confirm()
         with self.assertRaisesRegex(UserError, "Do not duplicate"):
@@ -136,8 +143,9 @@ class TestPurchaseMigration(FinancialCutoverCase):
 
     def test_existing_destination_reference_blocks_duplicate_draft(self):
         self._invoice()
-        self._order()
+        original = self._order()
         history = self._run().purchase_history_ids
+        original.button_cancel()
         self.env["purchase.order"].with_company(self.target).create({
             "company_id": self.target.id, "partner_id": self.vendor.id, "partner_ref": "Supplier reference"})
         with self.assertRaisesRegex(UserError, "existing destination purchase order"):

@@ -4,6 +4,18 @@ A one-time opening-stock cutover from an old company to its replacement company 
 
 ## Before starting
 
+Release 19.0.2.7.7 saves completed stock audits and reconciliation data as private
+native Odoo attachments when the move completes and again before uninstalling.
+Native products, locations, lots, stock movements and accounting entries are
+retained; uninstalling is not an undo. Recovery JSON and readable HTML reports
+can be found by a Settings administrator under Technical → Attachments. Keep
+the database and filestore together in backups. Only completed moves are
+archived. The stock wizard screens are not automatically rebuilt on reinstall;
+the saved audits remain in the attachments. Existing native completion markers
+remain and prevent repeating completed product movements. Uninstall through
+Odoo before removing the addon files. Full uninstall behaviour still needs
+validation with this addon's Enterprise and Kit BoM dependencies.
+
 Release 19.0.2.7.3 allows Periodic source stock to move into an existing Perpetual destination product. Closing and opening accounting are checked using each side’s valuation setting; the destination product is reused and neither setting changes. Build a fresh Preview after upgrading.
 Release 19.0.2.7.2 reconciles non-lot FIFO stock left in other source locations from the reviewed remaining receipt quantities and costs. Independently rounded source remainder and closing totals no longer create a false one-cent failure; the difference is recorded in Native Currency Rounding. Currency precision is not relaxed, and genuine value differences still roll back.
 Release 19.0.2.7.1 fixes uncategorized products: their new copies use the named Opening Stock category with the source company's costing and valuation methods. Originals remain unchanged.

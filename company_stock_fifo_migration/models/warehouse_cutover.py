@@ -566,6 +566,8 @@ class WholeWarehouseCutover(models.Model):
                 "completed_at": fields.Datetime.now(), "completed_by_id": self.env.user.id,
             })
             self._system().write({"state": "done", "stock_batch_id": batch.id})
+            from ..hooks import save_stock_archive
+            save_stock_archive(batch)
         return {"type": "ir.actions.client", "tag": "reload"}
 
     def action_open_reconciliation(self):

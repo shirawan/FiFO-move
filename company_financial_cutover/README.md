@@ -3,7 +3,10 @@
 Move financial opening balances and unpaid customer/vendor items from an old
 company into a clean replacement company in the same Odoo 19 database. Source
 accounting history stays in the old company. No old tax, journal or company
-configuration is copied into the replacement.
+configuration is copied into the replacement. Choose financial balances,
+purchase orders, or both. Stock is available through the separate stock mover.
+Purchase-only moves do not require an empty destination ledger, matching fiscal
+years, or financial account choices, and never create an accounting entry.
 
 ## What moves
 
@@ -19,7 +22,7 @@ configuration is copied into the replacement.
   dates, partners and foreign-currency amounts. Zero-net control accounts retain
   their separate unpaid debit and credit items.
 
-The addon posts one balanced Miscellaneous opening entry. Unpaid items are
+When financial balances are selected, the addon posts one balanced Miscellaneous opening entry. Unpaid items are
 reconcilable journal items, **not recreated invoices**; settle them using native
 customer/vendor payments and reconciliation in the destination. Historical
 invoices, payments, bank statements and tax reports remain in the source.
@@ -27,21 +30,21 @@ Tax control-account balances move without duplicating tax tags or taxable invoic
 
 ## Setup and guided steps
 
-The screen highlights the next step: **Check existing data → Review amounts →
-Move balances**. Messages explain what needs attention and who can help. Reviewed
+The screen highlights the next step: **Check existing data → Review selected data →
+Move selected data**. Messages explain what needs attention and who can help. Reviewed
 amounts appear directly on the page; account choices stay under **Accounts and
 contacts** and **Accountant setup**. A completed move shows its result and the
 next stock step.
 
 1. Install this addon from your custom addons directory. In Apps, update the Apps
    List and search for **Company Financial Cutover** with the Apps filter removed. Odoo installs its `account` and `purchase` dependencies.
-2. Configure the replacement company's chart, journals and fiscal year correctly.
+2. For financial balances, configure the replacement company's chart, journals and fiscal year correctly.
    Both companies must use the same accounting currency and fiscal year start.
    The destination must have **no draft or posted accounting entries, and no active payments**. Take a verified
    database backup and use a restored test copy before the actual cutover.
 3. Sign in as a Settings administrator with Accounting administrator access and
    enable both companies. Open **Accounting/Invoicing → Configuration → Move
-   Financial Opening**. Choose the old company, new company and date. The existing MISC journal is preferred; otherwise a single suitable general journal is selected. Cash-basis and exchange-difference journals are excluded. Retained earnings are selected only when there is one suitable account. Ask your accountant to complete **Accountant setup** when the chart has multiple earnings accounts.
+   Company Data**. Choose what to move and the old and new companies. For financial balances, enter the date. The existing MISC journal is preferred; otherwise a single suitable general journal is selected. Cash-basis and exchange-difference journals are excluded. Retained earnings are selected only when there is one suitable account. Ask your accountant to complete **Accountant setup** when the chart has multiple earnings accounts. Financial setup tabs are hidden for purchase-only moves.
 4. Click **1. Check existing data**. Matching uses account codes and types
    against the destination's existing chart. Select accounts manually where the
    codes differ. Missing or incompatible account choices block posting; accounts
@@ -55,25 +58,26 @@ next stock step.
    that addon is installed. Otherwise configure a Current Assets clearing account
    and explicitly use that same account in the stock mover. A mismatch with the stock mover’s saved destination clearing account blocks the financial opening. Inventory is excluded
    from this financial entry and carried through clearing instead.
-6. Read **Check results** and resolve any needs-attention message. Run Check existing data again after editing choices. Click **2. Review amounts**. This creates review/audit rows only, without
+6. Read **Check results** and resolve any needs-attention message. Run Check existing data again after editing choices. Click **2. Review selected data**. This creates review/audit rows only, without
    destination contacts or journals. Reconcile the trial balance, retained
    earnings, stock exclusions and each unpaid item with the accountant. Rebuild
    Preview after any configuration, mapping or accounting changes.
-7. Finish bank reconciliation in the old company on or before the cutover date. Unsettled outstanding receipts/payments, suspense and interbank-transfer items block the move; these items are not carried individually. Then pause writes, scheduled jobs, queue workers and other users across this database during the cutover window. Ask your Odoo administrator to stop cron workers, including cron workers in other Odoo processes; `--max-cron-threads=0` applies only to the process it starts.
-   Click **3. Move balances**. Busy accounting tables, changed
+7. If moving financial balances, finish bank reconciliation in the old company on or before the cutover date. Unsettled outstanding receipts/payments, suspense and interbank-transfer items block the financial move; these items are not carried individually. Pause writes, scheduled jobs, queue workers and other users across this database during the move window. Ask your Odoo administrator to stop cron workers, including cron workers in other Odoo processes; `--max-cron-threads=0` applies only to the process it starts.
+   Click **3. Move selected data**. Busy tables, changed
    previews, wrong posting dates or reconciliation differences refuse/roll back
-   the operation. Review **View opening entry** and **Review amounts**.
+   the operation. Review the completed data and, if financial balances were selected, **View opening entry**.
    Run the stock cutover afterwards on the same agreed date and with the same
    destination clearing account. Reconcile its inventory/clearing entries before
    starting normal operations in the replacement.
 
 ### Purchase orders
 
-Leave **Include all purchase orders** enabled to include every source purchase
+Enable **Purchase orders (read-only history)** to include every source purchase
 order in the financial preview and approval. These snapshots preserve order and
 vendor references, status, dates, currency, totals, original terms, products,
 quantities, prices, discounts, original tax labels and bill references. The
-**Purchase orders** tab shows what will be copied. Copies appear under
+**Review selected data** section shows what will be copied. After completion,
+the **Purchase orders** tab shows saved history. Copies also appear under
 **Purchase → Migrated purchase history** after approval. Purchase user access is
 required to include orders; the financial operator still needs Settings and
 Accounting administrator access.
@@ -87,14 +91,16 @@ without access to the old company's live orders. Source chatter, attachments,
 receipt documents and purchase analytics are not copied into native Purchase
 reports; original records remain in the old company.
 
-For an order with **no received or billed quantities**, open its history and use
-**Prepare replacement draft**. This action reuses eligible existing
+For an order with **no received or billed quantities**, cancel the original order
+in the old company first, then open its history and use **Prepare replacement draft**.
+Cancellation is required before creating the draft, so uninstalling cannot leave
+both orders active. This action reuses eligible existing
 vendor/product records, uses the new company's tax configuration, and creates
 one unconfirmed RFQ. After a draft is prepared, **View replacement order** opens that same order. Review its taxes,
-prices, units, expected arrival and company settings before confirming. Cancel
-the original order before confirming the replacement; confirmation is blocked
-until the original is cancelled, and the old order cannot be reconfirmed while
-a replacement exists. The migrated replacement cannot be duplicated.
+prices, units, expected arrival and company settings before confirming. While
+this addon is installed, confirmation also checks the original remains cancelled,
+and the old order cannot be reconfirmed while a replacement exists. The migrated
+replacement cannot be duplicated through this addon.
 
 Partially received/billed orders, down payments, cancelled orders, dropshipping
 and mismatched or ambiguous vendor/product identities require manual purchase
@@ -123,6 +129,49 @@ The source has bank 50, inventory 100 and equity -150. The financial opening
 posts bank +50, stock clearing +100 and equity -150, excluding inventory.
 The stock mover then posts inventory +100 and stock clearing -100. The new
 company ends with bank 50, inventory 100, equity -150 and clearing zero.
+
+## Duplicates and uninstalling
+
+Already copied source purchase IDs are skipped. Native completion markers survive
+uninstalling and block copying the same history again, including to another
+company. If a marker exists but its history is missing, the mover stops and asks
+for archive recovery rather than creating another copy. Existing destination
+purchase references also block preparation of a conflicting replacement draft.
+
+Possible repeated vendor bills with the same vendor, normalized reference,
+currency, invoice date and total block the financial move. Possible repeated
+active, unreceived and unbilled orders with the same vendor, reference, order day,
+currency and product/quantity/price details block the purchase move, including
+when a new order matches an active order already copied. Ask the
+accountant or purchase manager to correct references, reverse an erroneous bill,
+or cancel an erroneous order. Fully reversed bills and cancelled purchase orders
+remain historical records. Records without references cannot be reliably
+identified as duplicates. These checks detect suspicious matches; they do not
+automatically merge, delete or correct existing data.
+
+Completed moves save a readable report and full financial/purchase recovery
+archive as private native Odoo attachments, with native hash manifests and
+purchase markers. Saving must succeed before the move commits. Upgrade and
+uninstall hooks also archive completed older batches. Native opening entries,
+their unpaid journal items and prepared native purchase orders remain after
+uninstalling. Custom audit/history tables are removed by Odoo, but reinstalling
+restores their completed rows and native record links from the saved archives.
+Recovery never reposts the opening or creates replacement orders again.
+
+Use **Download completed report** before uninstalling. Settings administrators
+can also find the private recovery JSON and report under Technical → Attachments;
+they are not visible to ordinary purchase users because financial details are
+included. Keep the database and filestore together in backups. Do not delete or
+change the archives or completion markers. Missing or changed recovery data
+stops restoration for administrator review.
+
+Only completed moves are archived; unfinished previews and unsaved choices must
+be rebuilt. Uninstall this addon through Odoo before removing its files. Custom
+edit/confirmation guards run only while the addon is installed; afterwards
+native Odoo permissions and workflows apply. Uninstall is refused if an original
+purchase has been reopened while an active replacement exists. Financial and
+purchase archives restore automatically on reinstall; stock audit archives
+remain readable files, with no automatic stock-wizard reconstruction.
 
 ## Boundaries
 
@@ -161,6 +210,10 @@ changed-preview checks, rollback, access control, forms, audit protection and
 payment reconciliation after cutover. The suite also exercises the real Odoo `retrying()` loop, rollback between attempts, native outstanding payments and bank-statement reconciliation, MISC selection on a multi-journal chart, clearing-account mismatches and downstream create hooks. These tests use Odoo 19 Community's native
 `account` module; the Enterprise stock addon integration requires its separate
 dependencies and testing on a restored copy of your database.
+
+Run `bash tools/test_retention.sh` for a real isolated uninstall, code removal
+and reinstall, checking unchanged native data, archive bytes and markers,
+restored completed history, and prevention of duplicate recovery/copying.
 
 The development test runner temporarily pauses automatic vacuum only in its
 verified local PostgreSQL cluster and restores the original setting on exit.

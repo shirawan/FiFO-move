@@ -20,7 +20,7 @@
                     <button name="action_prepare_draft" type="object" string="Prepare replacement draft" class="oe_highlight"
                         groups="account.group_account_manager"
                         invisible="not draft_eligible or target_order_id"
-                        confirm="Prepare one unconfirmed draft in the new company? Review its vendor, products, prices and taxes before confirming. Cancel the original order first so it cannot be received or billed twice."/>
+                        confirm="Prepare one unconfirmed draft in the new company? Review its vendor, products, prices and taxes before confirming. The original order must already be cancelled so it cannot be received or billed twice."/>
                     <button name="action_prepare_draft" type="object" string="View replacement order" class="oe_highlight"
                         groups="account.group_account_manager" invisible="not target_order_id"/>
                     <field name="draft_eligible" invisible="True"/>

@@ -3,6 +3,7 @@ from odoo.exceptions import AccessError, UserError
 
 
 _CUTOVER_CREATE_TOKEN = object()
+_CUTOVER_RESTORE_TOKEN = object()
 
 
 class AccountMove(models.Model):
@@ -30,12 +31,18 @@ class AccountMove(models.Model):
         return move.with_env(self.env)
 
     def write(self, vals):
-        if "financial_cutover_id" in vals:
+        capability = self.env.context.get("_financial_cutover_restore")
+        if "financial_cutover_id" in vals and not (
+            isinstance(capability, tuple) and len(capability) == 2
+            and capability[0] is _CUTOVER_RESTORE_TOKEN and capability[1] == vals["financial_cutover_id"]):
             raise AccessError("Financial cutover links are system-managed.")
         if {"date", "name", "ref", "company_id", "currency_id", "journal_id", "line_ids", "state"}.intersection(vals):
             if self.filtered(lambda m: m.financial_cutover_id.state == "done"):
                 raise UserError("Completed financial opening entries cannot be changed or reset. Post accountant-reviewed corrections separately.")
         return super().write(vals)
+
+    def _restore_financial_cutover_link(self, cutover_id):
+        return self.with_context(_financial_cutover_restore=(_CUTOVER_RESTORE_TOKEN, cutover_id)).write({"financial_cutover_id": cutover_id})
 
     def unlink(self):
         if self.financial_cutover_id.filtered(lambda b: b.state == "done"):

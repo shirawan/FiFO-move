@@ -59,7 +59,7 @@ class FinancialCutover(models.Model):
 
     @api.model_create_multi
     def create(self, vals_list):
-        protected = {"name", "state", "snapshot_hash", "move_id", "completed_at", "completed_by", "summary", "line_ids", "check_status", "check_report", "purchase_preview_data", "purchase_history_ids", "purchase_history_preview_ready"}
+        protected = {"name", "state", "snapshot_hash", "move_id", "completed_at", "completed_by", "summary", "line_ids", "check_status", "check_report", "purchase_preview_data", "purchase_history_ids", "purchase_history_preview_ready", "archive_key", "archive_attachment_id", "report_attachment_id"}
         if any(protected.intersection(vals) for vals in vals_list):
             raise AccessError("Cutover audit fields are system-managed.")
         records = super().create(vals_list)
@@ -81,7 +81,7 @@ class FinancialCutover(models.Model):
 
     def write(self, vals):
         self._operator()
-        protected = {"name", "state", "snapshot_hash", "move_id", "completed_at", "completed_by", "summary", "line_ids", "check_status", "check_report", "purchase_preview_data", "purchase_history_ids", "purchase_history_preview_ready"}
+        protected = {"name", "state", "snapshot_hash", "move_id", "completed_at", "completed_by", "summary", "line_ids", "check_status", "check_report", "purchase_preview_data", "purchase_history_ids", "purchase_history_preview_ready", "archive_key", "archive_attachment_id", "report_attachment_id"}
         if protected.intersection(vals):
             raise AccessError("Cutover audit fields are system-managed.")
         self._invalidate_preview()
@@ -146,7 +146,7 @@ class FinancialCutover(models.Model):
             raise UserError("The cutover date cannot be in the future.")
         # Check across all previous destinations, including companies hidden by
         # the current switcher. Reveal only that this accessible source moved.
-        if (self.sudo().search_count([("source_company_id", "=", source.id), ("state", "=", "done")])
+        if (self.sudo().search_count([("source_company_id", "=", source.id), ("state", "=", "done"), ("include_financial", "=", True)])
             or self.env["ir.config_parameter"].sudo().search_count([("key", "=", self._completion_key())])):
             raise UserError("This source company already has a completed financial cutover.")
         posted = self.env["account.move"].search_count([("company_id", "=", target.id), ("state", "=", "posted")])
@@ -198,13 +198,30 @@ class FinancialCutover(models.Model):
             raise UserError("No posted source journal items exist on or before the cutover date.")
         if not self.currency_id.is_zero(sum(lines.mapped("balance"))):
             raise UserError("The source trial balance is not balanced; repair it before cutover.")
+        self._check_duplicate_bills(lines.move_id)
         return lines
+
+    def _check_duplicate_bills(self, moves):
+        seen = {}
+        for move in moves.filtered(lambda m: m.move_type == "in_invoice" and m.ref):
+            reversals = move.reversal_move_ids.filtered(lambda r: r.state == "posted" and r.date <= self.cutover_date
+                and r.move_type == "in_refund" and r.currency_id == move.currency_id)
+            if reversals and move.currency_id.is_zero(move.amount_total - sum(reversals.mapped("amount_total"))):
+                continue
+            key = (move.partner_id.commercial_partner_id.id, self._identity(move.ref, True),
+                move.currency_id.id, str(move.invoice_date), move.amount_total)
+            if key in seen:
+                raise UserError("Possible duplicate vendor bills in the old company: %s and %s use the same vendor reference, date, currency and total. Ask your accountant to correct or review the old bills before moving financial balances. They will not be silently merged or removed."
+                    % (seen[key].display_name, move.display_name))
+            seen[key] = move
 
     def action_match(self):
         """Prepare editable choices without creating destination business records."""
         self.ensure_one()
         self._operator()
         self._invalidate_preview()
+        if not self.include_financial:
+            return self._check_purchase_only()
         if self.source_company_id == self.target_company_id:
             raise UserError("Choose different source and destination companies.")
         self._suggest_settings()
@@ -256,7 +273,7 @@ class FinancialCutover(models.Model):
             report.append("Needs attention: %s" % exc)
         else:
             status = "ready"
-            report.append("Checks passed. Next: click 2. Review amounts and check them with your accountant before moving.")
+            report.append("Checks passed. Next: click 2. Review selected data and check the financial amounts with your accountant before moving.")
         self._system_write({"check_status": status, "check_report": "\n\n".join(report)})
         return True
 

@@ -13,6 +13,7 @@ from odoo.tools.float_utils import float_is_zero, float_repr, float_round
 MAX_PURCHASE_ORDERS = 10000
 MAX_PURCHASE_LINES = 50000
 _PURCHASE_CREATE_TOKEN = object()
+_PURCHASE_RESTORE_TOKEN = object()
 
 
 def purchase_status_label(state, env):
@@ -36,13 +37,13 @@ def purchase_draft_advice(snapshot, env):
     if any(not float_is_zero(line[key], precision_digits=snapshot.get("unit_decimals", 2))
             for line in lines for key in ("received", "billed")):
         return False, env._("Some quantities were already received or billed. Review the remaining quantities below with your purchase manager.")
-    return True, env._("Nothing was received or billed when this history was copied. You can prepare a draft in the new company, then review its products, vendor and taxes. Cancel the old order before confirming the replacement.")
+    return True, env._("Nothing was received or billed when this history was copied. Cancel the original order in the old company first, then prepare a replacement draft here. Review the new draft's products, vendor and taxes before confirming it.")
 
 
 class FinancialCutover(models.Model):
     _inherit = "company.financial.cutover"
 
-    include_purchase_history = fields.Boolean(string="Include all purchase orders", default=True,
+    include_purchase_history = fields.Boolean(string="Purchase orders (read-only history)", default=True,
         help="Copy all source orders, including cancelled and completed orders, as read-only history at preview time. No receipts or bills are recreated.")
     purchase_preview_data = fields.Json(readonly=True, copy=False)
     purchase_preview_html = fields.Html(compute="_compute_purchase_preview", sanitize=True)
@@ -87,12 +88,32 @@ class FinancialCutover(models.Model):
         existing = self.env["company.financial.purchase.history"].sudo().search([
             ("company_id", "=", self.target_company_id.id), ("source_company_id", "=", self.source_company_id.id),
             ("source_order_res_id", "in", orders.ids)])
-        if existing and self.state != "done":
-            raise UserError("Some purchase orders already have history in the new company. No duplicate history will be created.")
-        if existing:
-            copied = set(existing.mapped("source_order_res_id"))
-            orders = orders.filtered(lambda order: order.id not in copied)
-        return [self._purchase_row(order) for order in orders]
+        from .retention import purchase_marker_key
+        markers = self.env["ir.config_parameter"].sudo().search([
+            ("key", "in", [purchase_marker_key(self.source_company_id.id, order.id) for order in orders])])
+        copied = set(existing.mapped("source_order_res_id"))
+        for parameter in markers:
+            marker = self._read_purchase_marker(parameter)
+            if (marker.get("source_company_id") != self.source_company_id.id
+                or parameter.key != purchase_marker_key(self.source_company_id.id, marker.get("source_order_id"))):
+                raise UserError("A purchase migration marker does not match its source order. Ask your administrator to recover it; no duplicate will be created.")
+            if marker["target_company_id"] != self.target_company_id.id:
+                raise UserError("Some purchase orders already moved to another company. Ask your administrator to review the saved migration archive; another copy will not be created.")
+            if marker.get("source_order_id") not in copied:
+                raise UserError("Purchase history was previously copied but its history screen is missing. Reinstall or recover its saved archive before continuing; no duplicate copy will be created.")
+        all_rows = [self._purchase_row(order) for order in orders]
+        rows = [row for row in all_rows if row["id"] not in copied]
+        seen = {}
+        for row in all_rows:
+            if not row["vendor_ref"] or not purchase_draft_advice(row, self.env)[0]:
+                continue
+            signature = (row["vendor_id"], self._identity(row["vendor_ref"], True), row["currency_id"], row["date_order"][:10],
+                tuple((line["product_id"], line["qty"], line["uom_id"], line["price"], line["discount"]) for line in row["lines"] if not line["display_type"]))
+            if signature in seen and (row["id"] not in copied or seen[signature]["id"] not in copied):
+                raise UserError("Possible duplicate unprocessed purchase orders: %s and %s have the same vendor reference and items. Ask your purchase manager to cancel the wrong duplicate or correct its reference in the old company before copying. Cancelled orders are kept as history."
+                    % (seen[signature]["name"], row["name"]))
+            seen[signature] = row
+        return rows
 
     def _plan(self):
         rows, digest, count = super()._plan()
@@ -133,8 +154,8 @@ class FinancialCutover(models.Model):
                 "This is a read-only history copy. No order is confirmed, no receipt is created, and no vendor bill is recreated.</p>"
                 "<div class='table-responsive'><table class='table table-sm'><thead><tr><th scope='col'>Order</th><th scope='col'>Vendor</th><th scope='col'>Original status</th><th scope='col'>Lines</th><th scope='col'>Order total</th>"
                 "</tr></thead><tbody>" + body + "</tbody></table></div>") if rows else (
-                    "<p>No purchase orders were found for this review.</p>" if batch.purchase_preview_data is not False
-                    else "<p>Click 2. Review amounts to see the purchase orders that will be copied.</p>")
+                    "<p>No new purchase orders to copy. Already copied orders are skipped; earlier copies remain under Purchase → Migrated purchase history.</p>" if batch.purchase_preview_data is not False
+                    else "<p>Click 2. Review selected data to see the purchase orders that will be copied.</p>")
 
     def action_apply(self):
         with self.env.cr.savepoint():
@@ -265,6 +286,8 @@ class PurchaseHistory(models.Model):
             source = self.env["purchase.order"].browse(self.source_order_res_id).exists()
             if not source:
                 raise UserError("The original order no longer exists. Review its migrated history with your purchase manager.")
+            if source.state != "cancel":
+                raise UserError("Cancel the original order in the old company before preparing its replacement. This keeps two active orders from surviving an addon uninstall.")
             current = batch._purchase_row(source)
             for key in ("vendor_id", "currency_id", "lines", "dropship"):
                 if current[key] != snapshot[key]:
@@ -325,7 +348,10 @@ class PurchaseOrder(models.Model):
         return super().create(vals_list)
 
     def write(self, values):
-        if "financial_purchase_history_id" in values:
+        capability = self.env.context.get("_financial_purchase_restore")
+        if "financial_purchase_history_id" in values and not (
+            isinstance(capability, tuple) and len(capability) == 2 and capability[0] is _PURCHASE_RESTORE_TOKEN
+            and capability[1] == values["financial_purchase_history_id"]):
             raise AccessError("Migrated purchase links are system-managed.")
         if values.get("state") == "purchase":
             for order in self:
@@ -335,6 +361,9 @@ class PurchaseOrder(models.Model):
                 if migrated:
                     raise UserError("A replacement draft already exists in the new company. Do not confirm the old order again.")
         return super().write(values)
+
+    def _restore_purchase_history_link(self, history_id):
+        return self.with_context(_financial_purchase_restore=(_PURCHASE_RESTORE_TOKEN, history_id)).write({"financial_purchase_history_id": history_id})
 
     def copy(self, default=None):
         if self.financial_purchase_history_id:

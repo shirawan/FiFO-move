@@ -1,6 +1,6 @@
 {
     "name": "Company Stock Cutover",
-    "version": "19.0.2.7.6",
+    "version": "19.0.2.7.7",
     "summary": "Move warehouse stock between companies, preserving native costing and valuation",
     "category": "Inventory/Inventory",
     "author": "Sawo Coffee",
@@ -15,4 +15,5 @@
     ],
     "installable": True,
     "application": False,
+    "uninstall_hook": "uninstall_hook",
 }

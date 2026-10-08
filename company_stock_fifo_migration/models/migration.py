@@ -403,6 +403,8 @@ class CompanyStockFifoMigration(models.Model):
                 "state": "done", "created_move_ids": [Command.set(moves.ids)],
                 "completed_at": fields.Datetime.now(), "completed_by_id": self.env.user.id,
             })
+            from ..hooks import save_stock_archive
+            save_stock_archive(self)
         return {"type": "ir.actions.client", "tag": "reload"}
 
 
