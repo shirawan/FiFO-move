@@ -93,3 +93,8 @@ moved quantity is added. These destination totals cover all warehouses in the
 new company; **Left elsewhere in old company** shows source stock outside the
 selected warehouse. Older saved previews missing a destination baseline ask for
 a fresh preview rather than assuming zero existing stock.
+
+Quantities use fixed notation at the recorded Product Unit precision, including
+large quantities kept in grams. Odoo 19 uses this decimal precision across units
+of measure. Older previews without precision metadata display the full recorded
+value without scientific notation; rebuild previews after upgrading.

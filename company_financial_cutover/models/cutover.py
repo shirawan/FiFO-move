@@ -1,18 +1,20 @@
 import hashlib
 import json
+import logging
 import re
 from collections import defaultdict
 
-from psycopg2.errors import LockNotAvailable, SerializationFailure
+from psycopg2.errors import LockNotAvailable
 
 from odoo import Command, api, fields, models
-from odoo.exceptions import AccessError, UserError
+from odoo.exceptions import AccessError, ConcurrencyError, UserError
 
 
 OPEN_ITEM_TYPES = {"asset_receivable", "liability_payable"}
 PROFIT_TYPES = {"income", "income_other", "expense", "expense_depreciation", "expense_direct_cost"}
 MAX_SOURCE_LINES = 100000
 MAX_OPENING_LINES = 10000
+_logger = logging.getLogger(__name__)
 
 
 class FinancialCutover(models.Model):
@@ -53,7 +55,7 @@ class FinancialCutover(models.Model):
 
     @api.model_create_multi
     def create(self, vals_list):
-        protected = {"name", "state", "snapshot_hash", "move_id", "completed_at", "completed_by", "summary", "line_ids", "check_status", "check_report"}
+        protected = {"name", "state", "snapshot_hash", "move_id", "completed_at", "completed_by", "summary", "line_ids", "check_status", "check_report", "purchase_preview_data", "purchase_history_ids", "purchase_history_preview_ready"}
         if any(protected.intersection(vals) for vals in vals_list):
             raise AccessError("Cutover audit fields are system-managed.")
         records = super().create(vals_list)
@@ -75,7 +77,7 @@ class FinancialCutover(models.Model):
 
     def write(self, vals):
         self._operator()
-        protected = {"name", "state", "snapshot_hash", "move_id", "completed_at", "completed_by", "summary", "line_ids", "check_status", "check_report"}
+        protected = {"name", "state", "snapshot_hash", "move_id", "completed_at", "completed_by", "summary", "line_ids", "check_status", "check_report", "purchase_preview_data", "purchase_history_ids", "purchase_history_preview_ready"}
         if protected.intersection(vals):
             raise AccessError("Cutover audit fields are system-managed.")
         self._invalidate_preview()
@@ -91,14 +93,19 @@ class FinancialCutover(models.Model):
         return result
 
     def _suggest_settings(self):
-        """Use existing settings only when there is exactly one suitable choice."""
+        """Prefer the standard MISC journal; never guess an ambiguous equity account."""
         for batch in self:
             if not batch.target_company_id:
                 continue
             values = {}
             if not batch.journal_id:
-                matches = self.env["account.journal"].search([
-                    ("company_id", "=", batch.target_company_id.id), ("type", "=", "general")], limit=2)
+                Journal = self.env["account.journal"]
+                domain = [("company_id", "=", batch.target_company_id.id), ("type", "=", "general")]
+                matches = Journal.search([*domain, ("code", "=", "MISC")], limit=2)
+                if not matches:
+                    specialized = batch.target_company_id.currency_exchange_journal_id | batch.target_company_id.tax_cash_basis_journal_id
+                    matches = Journal.search([*domain, ("id", "not in", specialized.ids),
+                        ("code", "not in", ["CABA", "EXCH"])], limit=2)
                 if len(matches) == 1:
                     values["journal_id"] = matches.id
             if not batch.retained_earnings_account_id:
@@ -150,7 +157,10 @@ class FinancialCutover(models.Model):
         if dates["date_from"] != target.compute_fiscalyear_dates(self.cutover_date)["date_from"]:
             raise UserError("Align the companies' fiscal year boundaries before cutover.")
         if not self.journal_id or self.journal_id.type != "general" or not self.journal_id.active:
-            raise UserError("Choose an active destination Miscellaneous opening journal.")
+            raise UserError("Ask your accountant to choose the new company's Miscellaneous opening journal (normally MISC) in Accounting setup.")
+        specialized = target.currency_exchange_journal_id | target.tax_cash_basis_journal_id
+        if self.journal_id in specialized or self.journal_id.code in {"CABA", "EXCH"}:
+            raise UserError("Choose the Miscellaneous journal (normally MISC), rather than the cash-basis or exchange-difference journal.")
         if not self.journal_id.filtered_domain(self.journal_id._check_company_domain(target)):
             raise UserError("The opening journal must belong to the destination company.")
         if self.journal_id.currency_id and self.journal_id.currency_id != target.currency_id:
@@ -162,6 +172,14 @@ class FinancialCutover(models.Model):
             self._check_account(self.offset_account_id, target.currency_id)
             if self.offset_account_id.account_type != "asset_current":
                 raise UserError("Use the stock mover's Current Assets clearing account for excluded inventory.")
+            parameter = self.env["ir.config_parameter"].sudo().search([
+                ("key", "=", "company_stock_fifo_migration.clearing_account.%s" % target.id)])
+            if parameter:
+                if not parameter.value or not parameter.value.isdecimal():
+                    raise UserError("The stock mover's saved clearing-account reference is invalid. Ask your accountant to review it.")
+                if self.offset_account_id.id != int(parameter.value):
+                    raise UserError("The selected stock clearing account differs from the stock mover's saved account. "
+                        "Use Connect the stock move or choose the saved account so inventory clearing nets to zero.")
         return dates["date_from"]
 
     def _source_lines(self):
@@ -223,6 +241,10 @@ class FinancialCutover(models.Model):
         report = ["Existing accounts and contacts are reused wherever a clear match is found.",
             "Contacts: %s existing; %s proposed new; %s need a choice." % (
                 reused, new, len(self.partner_mapping_ids) - reused - new)]
+        needs_choice = self.partner_mapping_ids.filtered(lambda m: not m.target_partner_id and not m.create_contact)
+        if needs_choice:
+            report.append("Choose the correct existing contact for: %s. Name alone is not enough to auto-match different records."
+                % ", ".join(needs_choice[:10].source_partner_id.mapped("display_name")))
         try:
             self._plan()
         except UserError as exc:
@@ -266,7 +288,11 @@ class FinancialCutover(models.Model):
         return self.env["res.partner"]
 
     def _contact_compatible(self, source, target):
-        return all(not source[field] or self._identity(source[field], True) == self._identity(target[field], True)
+        # Reusing the very same shared record is safe. A matching display name
+        # between different records is only a candidate for explicit review.
+        identified = source == target or any(source[field] and target[field]
+            and self._identity(source[field], True) == self._identity(target[field], True) for field in ("vat", "ref"))
+        return identified and all(not source[field] or self._identity(source[field], True) == self._identity(target[field], True)
             for field in ("vat", "ref"))
 
     def _check_account(self, account, currency):
@@ -283,6 +309,27 @@ class FinancialCutover(models.Model):
             self.currency_id.round(line.balance - sum(debit.mapped("amount")) + sum(credit.mapped("amount"))),
             line.currency_id.round(line.amount_currency - sum(debit.mapped("debit_amount_currency")) + sum(credit.mapped("credit_amount_currency"))),
         )
+
+    def _check_bank_settlement(self, lines):
+        """Aggregated ledger balances cannot replace outstanding payment items."""
+        source = self.source_company_id
+        journals = self.env["account.journal"].with_company(source).search([
+            ("company_id", "=", source.id), ("type", "in", ["bank", "cash"])])
+        accounts = (journals.inbound_payment_method_line_ids.payment_account_id
+            | journals.outbound_payment_method_line_ids.payment_account_id | journals.suspense_account_id
+            | source.account_journal_suspense_account_id | source.transfer_account_id
+            | lines.move_id.origin_payment_id.outstanding_account_id)
+        template = self.env["account.chart.template"].with_company(source).with_context(allowed_company_ids=source.ids)
+        for key in ("account_journal_payment_debit_account_id", "account_journal_payment_credit_account_id"):
+            accounts |= template.ref(key, raise_if_not_found=False) or self.env["account.account"]
+        accounts = accounts.filtered(lambda a: a.account_type not in OPEN_ITEM_TYPES | {"asset_cash"})
+        for line in lines.filtered(lambda l: l.account_id in accounts):
+            balance, foreign = self._residual(line)
+            if not self.currency_id.is_zero(balance) or not line.currency_id.is_zero(foreign):
+                raise UserError("Finish bank reconciliation and outstanding receipts/payments in the old company "
+                    "on or before the cutover date. Unsettled item: %s on %s. "
+                    "These items cannot be carried as a lump balance without losing the items to match."
+                    % (line.move_id.display_name, line.account_id.display_name))
 
     def _signature(self, record, names):
         """Hash actual settings too: write_date can be unchanged within a second."""
@@ -304,6 +351,7 @@ class FinancialCutover(models.Model):
     def _plan(self):
         fiscal_start = self._validate()
         lines = self._source_lines()
+        self._check_bank_settlement(lines)
         mappings = {m.source_account_id.id: m for m in self.mapping_ids}
         partners = {m.source_partner_id.id: m for m in self.partner_mapping_ids}
         grouped = defaultdict(lambda: [0.0, 0.0])
@@ -336,7 +384,7 @@ class FinancialCutover(models.Model):
                     raise UserError("Unpaid cash-basis tax invoices need a separate accountant-reviewed tax migration. This opening would otherwise lose their future tax recognition: %s." % line.move_id.display_name)
                 mapping = partners.get(line.partner_id.id)
                 if not mapping or (not mapping.target_partner_id and not mapping.create_contact):
-                    raise UserError("Review the missing or ambiguous destination contact for %s." % line.partner_id.display_name)
+                    raise UserError("Review the missing or ambiguous destination contact for %s. Name-only matches require an explicit choice; only a tax ID, reference or the same shared record permits automatic reuse." % line.partner_id.display_name)
                 if mapping.target_partner_id and (not mapping.target_partner_id.active or mapping.target_partner_id.company_id not in (self.env["res.company"], self.target_company_id)):
                     raise UserError("The existing destination contact for %s is archived or belongs to another company. Review or reactivate it instead of creating a duplicate." % line.partner_id.display_name)
                 if not mapping.target_partner_id:
@@ -482,8 +530,8 @@ class FinancialCutover(models.Model):
         and lock acquisition is invisible to the original transaction. An
         independent primary cursor sees its status. Check every intervening
         transaction, including ones already running at the original snapshot,
-        so inserted/deleted rows are covered too. Odoo retries serialization
-        failures with a new transaction; a savepoint alone cannot refresh it.
+        so inserted/deleted rows are covered too. Odoo retries ConcurrencyError
+        with a new transaction; a savepoint alone cannot refresh it.
         """
         _xmin, xmax, running = snapshot.split(":")
         xmax = int(xmax)
@@ -492,13 +540,15 @@ class FinancialCutover(models.Model):
             fresh.execute("SELECT txid_snapshot_xmax(txid_current_snapshot())")
             latest = fresh.fetchone()[0]
             if latest - xmax > 1000:
-                raise SerializationFailure("Accounting snapshot is too old; retry the full request.")
+                raise ConcurrencyError("Accounting snapshot is too old; retry the full request.")
             candidates.update(range(xmax, latest))
             if candidates:
-                fresh.execute("SELECT EXISTS (SELECT 1 FROM unnest(%s::bigint[]) AS xid "
-                    "WHERE txid_status(xid) = 'committed')", [sorted(candidates)])
-                if fresh.fetchone()[0]:
-                    raise SerializationFailure("A transaction committed before cutover locks; retry the full request.")
+                fresh.execute("SELECT xid FROM unnest(%s::bigint[]) AS xid "
+                    "WHERE txid_status(xid) = 'committed' LIMIT 1", [sorted(candidates)])
+                committed = fresh.fetchone()
+                if committed:
+                    _logger.debug("Cutover snapshot %s is stale: transaction %s committed before locking", snapshot, committed[0])
+                    raise ConcurrencyError("A transaction committed before cutover locks; retry the full request.")
 
     def action_prepare_stock_clearing(self):
         self.ensure_one()
@@ -568,7 +618,8 @@ class FinancialCutover(models.Model):
                 "financial_cutover_id": self.id, "line_ids": commands,
             })
             move.action_post()
-            if move.state != "posted" or move.date != self.cutover_date or move.company_id != self.target_company_id:
+            if (move.state != "posted" or move.date != self.cutover_date
+                or move.company_id != self.target_company_id or move.financial_cutover_id != self):
                 raise UserError("Odoo did not post the opening on the reviewed date in the destination company.")
             posted = move.line_ids.sorted("sequence")
             if len(posted) != len(included) or not self.currency_id.is_zero(sum(posted.mapped("balance"))):

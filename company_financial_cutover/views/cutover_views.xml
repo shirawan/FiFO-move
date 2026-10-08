@@ -21,8 +21,13 @@
                     <button name="action_match" type="object" string="1. Check existing data" invisible="state == 'done'"/>
                     <button name="action_preview" type="object" string="2. Review amounts" class="oe_highlight" invisible="state == 'done' or check_status != 'ready'"/>
                     <button name="action_apply" type="object" string="3. Move balances" class="oe_highlight" invisible="state != 'preview'"
-                        confirm="Move the reviewed balances and unpaid items to the new company? Have a verified backup and pause accounting work first. Run the stock move afterwards if needed."/>
+                        confirm="Move the reviewed balances and unpaid items to the new company? Have a verified backup and ask your Odoo administrator to pause scheduled jobs and other writes across this database first. Run the stock move afterwards if needed."/>
                     <button name="action_open_entry" type="object" string="View completed move" invisible="state != 'done'"/>
+                    <button name="action_preview_purchases" type="object" string="1. Preview missing purchase orders" invisible="state != 'done'"/>
+                    <button name="action_import_purchases" type="object" string="2. Copy reviewed purchase history"
+                        invisible="state != 'done' or not purchase_history_preview_ready"
+                        confirm="Copy the reviewed missing purchase orders as read-only history? The financial opening, receipts and bills will not be recreated."/>
+                    <field name="purchase_history_preview_ready" invisible="True"/>
                     <field name="check_status" invisible="True"/>
                     <field name="state" widget="statusbar" statusbar_visible="draft,preview,done"/>
                 </header>
@@ -30,7 +35,7 @@
                     <div class="alert alert-info" role="status" invisible="state == 'done'">
                         Choose your old and new companies, then click Check existing data.
                         Review the amounts before clicking Move balances. This carries balances and unpaid customer/vendor items into the new company.
-                        Past invoices, payments and tax reports remain in the old company. If you also move stock, run this step first.
+                        Past invoices, payments and tax reports remain in the old company. Finish bank reconciliation in the old company first. If you also move stock, run this step before the stock move.
                     </div>
                     <h1><field name="name"/></h1>
                     <group>
@@ -39,6 +44,7 @@
                             <field name="target_company_id" readonly="state == 'done'"/>
                             <field name="cutover_date" readonly="state == 'done'"/>
                             <field name="currency_id"/>
+                            <field name="include_purchase_history" readonly="state == 'done'"/>
                         </group>
                     </group>
                     <group invisible="not check_report">
@@ -74,7 +80,7 @@
                                 </list>
                             </field>
                         </page>
-                        <page string="Contacts to reuse or create"><p>An existing contact is reused. A new contact is created only where no possible match exists, including archived contacts. Missing choices need your review.</p>
+                        <page string="Contacts to reuse or create"><p>An existing contact is reused. A new contact is created only where no possible match exists, including archived contacts. Name-only matches require your explicit choice. Missing choices need your review.</p>
                             <field name="partner_mapping_ids" readonly="state == 'done'">
                                 <list editable="bottom">
                                     <field name="source_partner_id" string="Old company contact" options="{'no_create': True}"/>
@@ -102,6 +108,17 @@
                                     <field name="amount_currency" optional="show"/>
                                     <field name="source_line_id" optional="hide"/>
                                     <field name="posted_line_id" optional="show"/>
+                                </list>
+                            </field>
+                        </page>
+                        <page string="Purchase orders">
+                            <p>All purchase orders are copied as read-only history. Receipts and bills are not recreated.
+                            After the move, open a history record to review remaining quantities or prepare an eligible draft.</p>
+                            <field name="purchase_preview_html" nolabel="1" invisible="state == 'done' and not purchase_history_preview_ready"/>
+                            <field name="purchase_history_ids" invisible="state != 'done'">
+                                <list create="0" edit="0" delete="0">
+                                    <field name="name"/><field name="vendor_name"/><field name="original_state"/>
+                                    <field name="currency_id"/><field name="amount_total"/><field name="target_order_id"/>
                                 </list>
                             </field>
                         </page>

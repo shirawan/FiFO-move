@@ -3,11 +3,13 @@
 Odoo 19 addons for moving an existing business into a clean replacement company
 in the same database.
 
-- `company_stock_fifo_migration`: Company Stock Cutover 19.0.2.7.4, based on the supplied
+- `company_stock_fifo_migration`: Company Stock Cutover 19.0.2.7.5, based on the supplied
   19.0.2.7.3 addon, with a clearer existing-stock preview. Requires Odoo Enterprise `stock_accountant`,
   `product_expiry`, and the separate `company_kit_bom_migration` addon.
 - `company_financial_cutover`: financial opening balances and unpaid
-  customer/vendor journal items. Requires Odoo 19 `account` only. It uses the new
+  customer/vendor journal items, plus all purchase orders as read-only destination
+  history with explicit draft preparation for eligible unfinished orders. Requires
+  Odoo 19 `account` and `purchase`. It uses the new
   company's account configuration and retains the old company's history.
 
 See [financial cutover instructions](company_financial_cutover/README.md) and

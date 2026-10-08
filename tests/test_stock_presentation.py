@@ -45,6 +45,23 @@ class TestStockPresentation(unittest.TestCase):
         self.assertFalse(rendered.xpath("//script|//img"))
         self.assertEqual(rendered.xpath("//tbody/tr/td/text()")[0], "<script>alert(1)</script>")
 
+    def test_large_gram_quantities_are_exact_and_use_fixed_notation(self):
+        snapshot = self._snapshot()
+        snapshot["products"][0].update({"quantity": 1234567, "company_quantity": 1234570,
+            "unit": "g", "unit_decimals": 2})
+        self.assertEqual(self._cells(snapshot)[2:7], ["10", "1234567", "1234577", "3", "g"])
+
+    def test_quantities_round_half_up_at_the_reviewed_unit_precision(self):
+        snapshot = self._snapshot()
+        snapshot["products"][0].update({"quantity": 1.2345, "company_quantity": 1.2345, "unit_decimals": 3})
+        self.assertEqual(self._cells(snapshot)[3:5], ["1.235", "11.235"])
+        self.assertEqual(presentation.format_quantity(-0.0001, 3), "0")
+
+    def test_old_preview_preserves_small_quantities_without_scientific_notation(self):
+        snapshot = self._snapshot(target=False)
+        snapshot["products"][0].update({"quantity": 0.00001234567, "company_quantity": 0.00001234567})
+        self.assertEqual(self._cells(snapshot)[3:5], ["0.00001234567", "0.00001234567"])
+
 
 if __name__ == "__main__":
     unittest.main()

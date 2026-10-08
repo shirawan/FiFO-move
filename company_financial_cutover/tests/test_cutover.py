@@ -1,15 +1,14 @@
 from datetime import date
 from unittest.mock import patch
-
-from psycopg2.errors import SerializationFailure
+from uuid import uuid4
 
 from odoo import Command, api
-from odoo.exceptions import AccessError, UserError
+from odoo.exceptions import AccessError, ConcurrencyError, UserError
+from odoo.service.model import retrying
 from odoo.tests import Form, TransactionCase, tagged, new_test_user
 
 
-@tagged("post_install", "-at_install")
-class TestFinancialCutover(TransactionCase):
+class FinancialCutoverCase(TransactionCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
@@ -108,6 +107,8 @@ class TestFinancialCutover(TransactionCase):
         batch.action_apply()
         return batch
 
+@tagged("post_install", "-at_install")
+class TestFinancialCutover(FinancialCutoverCase):
     def test_native_invoices_partial_payment_and_unpaid_bill(self):
         invoice = self._invoice()
         bill = self._invoice("in_invoice", 80)
@@ -408,9 +409,9 @@ class TestFinancialCutover(TransactionCase):
         return contact
 
     def test_archived_matching_contact_is_not_duplicated(self):
-        source = self._owned_customer()
+        source = self._owned_customer(ref="ARCH-001")
         archived = self.env["res.partner"].create({
-            "name": source.name, "company_id": self.target.id, "active": False})
+            "name": source.name, "ref": source.ref, "company_id": self.target.id, "active": False})
         batch = self._batch()
         batch.action_match()
         self.assertEqual(batch.check_status, "blocked")
@@ -437,10 +438,18 @@ class TestFinancialCutover(TransactionCase):
         self._run(batch)
         self.assertEqual(batch.partner_mapping_ids.target_partner_id, existing)
 
-    def test_normalized_names_reuse_existing_contact(self):
+    def test_name_only_match_requires_explicit_choice(self):
         self._owned_customer("  Acme   Trading  ")
         existing = self.env["res.partner"].create({"name": "ACME Trading", "company_id": self.target.id})
-        batch = self._run()
+        batch = self._batch()
+        batch.action_match()
+        self.assertEqual(batch.check_status, "blocked")
+        self.assertFalse(batch.partner_mapping_ids.target_partner_id)
+        self.assertFalse(batch.partner_mapping_ids.create_contact)
+        with self.assertRaisesRegex(UserError, "Name-only matches require an explicit choice"):
+            batch.action_preview()
+        batch.partner_mapping_ids.target_partner_id = existing
+        self._run(batch)
         self.assertEqual(batch.partner_mapping_ids.target_partner_id, existing)
 
     def test_conflicting_identity_requires_manual_contact_choice(self):
@@ -542,6 +551,143 @@ class TestFinancialCutover(TransactionCase):
         batch.partner_mapping_ids.create_contact = True
         self.assertEqual(batch.check_status, "unchecked")
 
+    def test_reference_match_can_reuse_a_differently_named_contact(self):
+        self._owned_customer("Previous name", ref="CUST-001")
+        existing = self.env["res.partner"].create({
+            "name": "Updated legal name", "ref": "cust001", "company_id": self.target.id})
+        batch = self._run()
+        self.assertEqual(batch.partner_mapping_ids.target_partner_id, existing)
+
+    def test_name_only_match_to_a_different_shared_contact_requires_choice(self):
+        self._owned_customer("John Smith")
+        self.env["res.partner"].create({"name": "John Smith"})
+        batch = self._batch()
+        batch.action_match()
+        self.assertFalse(batch.partner_mapping_ids.target_partner_id)
+        self.assertFalse(batch.partner_mapping_ids.create_contact)
+        with self.assertRaisesRegex(UserError, "Name-only matches require an explicit choice"):
+            batch.action_preview()
+
+    def test_misc_suggestion_with_three_general_journals_and_ambiguous_equity(self):
+        self._invoice()
+        self.journals[self.target.id]["general"].code = "MISC"
+        self.env["account.journal"].with_company(self.target).create([
+            {"name": code, "code": code, "type": "general", "company_id": self.target.id}
+            for code in ("CABA", "EXCH")])
+        self.env["account.account"].with_company(self.target).create({
+            "name": "Another earnings account", "code": "3011", "account_type": "equity_unaffected",
+            "company_ids": [Command.set(self.target.ids)]})
+        batch = self.env["company.financial.cutover"].create({
+            "source_company_id": self.source.id, "target_company_id": self.target.id, "cutover_date": self.cutoff})
+        self.assertEqual(batch.journal_id.code, "MISC")
+        self.assertFalse(batch.retained_earnings_account_id)
+        batch.retained_earnings_account_id = self.accounts[self.target.id]["retained"]
+        self._run(batch)
+
+    def test_cash_basis_journal_cannot_be_used_for_an_opening(self):
+        self._invoice()
+        batch = self._batch()
+        batch.journal_id = self.env["account.journal"].with_company(self.target).create({
+            "name": "Cash basis", "code": "CABA", "type": "general", "company_id": self.target.id})
+        batch.action_match()
+        with self.assertRaisesRegex(UserError, "Miscellaneous journal"):
+            batch.action_preview()
+
+    def test_saved_stock_clearing_mismatch_added_after_preview_is_blocked(self):
+        self._entry(self.source, [("inventory", 100), ("equity", -100)])
+        batch = self._batch()
+        batch.action_match()
+        batch.mapping_ids.filtered(lambda m: m.source_account_id == self.accounts[self.source.id]["inventory"]).handled_by_stock = True
+        batch.offset_account_id = self.accounts[self.target.id]["clearing"]
+        batch.action_preview()
+        parameter = self.env["ir.config_parameter"].sudo().create({
+            "key": "company_stock_fifo_migration.clearing_account.%s" % self.target.id,
+            "value": str(self.accounts[self.target.id]["inventory"].id)})
+        with self.assertRaisesRegex(UserError, "differs from the stock mover's saved account"):
+            batch.action_apply()
+        self.assertFalse(batch.move_id)
+        parameter.value = str(batch.offset_account_id.id)
+        batch.action_apply()
+        self.assertEqual(batch.state, "done")
+
+    def test_opening_runs_later_create_overrides(self):
+        self._invoice()
+        model_type = type(self.env["account.move"])
+        original_create = model_type.create
+        visited = []
+
+        def later_override(records, values):
+            if isinstance(values, dict) and values.get("financial_cutover_id"):
+                visited.append(values["financial_cutover_id"])
+                values = {**values, "ref": values["ref"] + " | downstream hook"}
+            return original_create(records, values)
+
+        with patch.object(model_type, "create", later_override):
+            batch = self._run()
+        self.assertEqual(visited, [batch.id])
+        self.assertIn("downstream hook", batch.move_id.ref)
+
+    def test_rpc_context_cannot_forge_internal_opening_creation(self):
+        batch = self._batch()
+        for flag in (True, "internal", [True, batch.id], ("internal", batch.id)):
+            with self.assertRaises(AccessError), self.env.cr.savepoint():
+                self.env["account.move"].with_context(_financial_cutover_create=flag).create({
+                    "company_id": self.target.id, "journal_id": self.journals[self.target.id]["general"].id,
+                    "financial_cutover_id": batch.id, "date": self.cutoff})
+
+    def _outstanding_payment(self):
+        invoice = self._invoice(amount=300)
+        clearing = self.accounts[self.source.id]["clearing"]
+        clearing.reconcile = True
+        journal = self.env["account.journal"].with_company(self.source).create({
+            "name": "Old bank", "code": "BANK", "type": "bank", "company_id": self.source.id,
+            "default_account_id": self.accounts[self.source.id]["bank"].id,
+            "suspense_account_id": clearing.id})
+        journal.inbound_payment_method_line_ids.payment_account_id = clearing
+        payment = self.env["account.payment"].with_company(self.source).create({
+            "company_id": self.source.id, "journal_id": journal.id, "partner_id": self.customer.id,
+            "payment_type": "inbound", "partner_type": "customer", "amount": 300, "date": self.cutoff,
+            "payment_method_line_id": journal.inbound_payment_method_line_ids[:1].id})
+        payment.action_post()
+        receivables = (invoice | payment.move_id).line_ids.filtered(
+            lambda l: l.account_id.account_type == "asset_receivable")
+        receivables.reconcile()
+        return journal, payment.move_id.line_ids.filtered(lambda l: l.account_id == clearing)
+
+    def _clear_payment(self, journal, outstanding, when):
+        statement = self.env["account.bank.statement.line"].with_company(self.source).create({
+            "journal_id": journal.id, "amount": 300, "date": when,
+            "payment_ref": "Customer receipt cleared", "partner_id": self.customer.id,
+            "counterpart_account_id": outstanding.account_id.id})
+        counterpart = statement.move_id.line_ids.filtered(lambda l: l.account_id == outstanding.account_id)
+        (outstanding | counterpart).reconcile()
+
+    def test_unsettled_native_customer_receipt_blocks_cutover(self):
+        self._outstanding_payment()
+        batch = self._batch()
+        batch.action_match()
+        self.assertEqual(batch.check_status, "blocked")
+        with self.assertRaisesRegex(UserError, "Finish bank reconciliation"):
+            batch.action_preview()
+        self.assertFalse(batch.move_id)
+
+    def test_receipt_cleared_by_cutover_moves_only_bank_balance(self):
+        journal, outstanding = self._outstanding_payment()
+        self._clear_payment(journal, outstanding, self.cutoff)
+        batch = self._run()
+        bank = batch.move_id.line_ids.filtered(lambda l: l.account_id == self.accounts[self.target.id]["bank"])
+        self.assertEqual(bank.balance, 300)
+        self.assertFalse(batch.move_id.line_ids.filtered(lambda l: l.account_id == self.accounts[self.target.id]["clearing"]))
+
+    def test_receipt_cleared_after_cutover_is_still_blocked_at_cutover(self):
+        journal, outstanding = self._outstanding_payment()
+        self._clear_payment(journal, outstanding, date(2024, 7, 1))
+        self.assertEqual(outstanding.amount_residual, 0)
+        batch = self._batch()
+        batch.action_match()
+        with self.assertRaisesRegex(UserError, "Finish bank reconciliation"):
+            batch.action_preview()
+
 
 @tagged("post_install", "-at_install")
 class TestSnapshotFreshness(TransactionCase):
@@ -561,7 +707,7 @@ class TestSnapshotFreshness(TransactionCase):
             with self.registry.cursor() as concurrent:
                 concurrent.execute("SELECT txid_current()")
                 concurrent.commit()
-            with self.assertRaises(SerializationFailure):
+            with self.assertRaises(ConcurrencyError):
                 self._check(original, snapshot)
 
     def test_already_running_transaction_committing_requires_full_retry(self):
@@ -569,7 +715,7 @@ class TestSnapshotFreshness(TransactionCase):
             concurrent.execute("SELECT txid_current()")
             snapshot = self._snapshot(original)
             concurrent.commit()
-            with self.assertRaises(SerializationFailure):
+            with self.assertRaises(ConcurrencyError):
                 self._check(original, snapshot)
 
     def test_uncommitted_and_own_subtransactions_do_not_require_retry(self):
@@ -588,3 +734,27 @@ class TestSnapshotFreshness(TransactionCase):
             concurrent.commit()
         with self.registry.cursor() as original:
             self._check(original, self._snapshot(original))
+
+    def test_real_odoo_retry_loop_refreshes_snapshot_and_rolls_back_first_attempt(self):
+        attempts = []
+        key = "company_financial_cutover.test.retry.%s" % uuid4().hex
+        with self.registry.cursor() as original:
+            env = api.Environment(original, self.env.uid, self.env.context)
+
+            def request():
+                attempts.append(len(attempts) + 1)
+                snapshot = self._snapshot(original)
+                if len(attempts) == 1:
+                    original.execute("INSERT INTO ir_config_parameter (key, value) VALUES (%s, 'first attempt')", [key])
+                    with self.registry.cursor() as concurrent:
+                        concurrent.execute("SELECT txid_current()")
+                        concurrent.commit()
+                env["company.financial.cutover"]._assert_fresh_snapshot(snapshot)
+                original.execute("SELECT count(*) FROM ir_config_parameter WHERE key = %s", [key])
+                self.assertEqual(original.fetchone()[0], 0)
+                return "retried with fresh data"
+
+            with patch("odoo.service.model.time.sleep"):
+                result = retrying(request, env)
+        self.assertEqual(result, "retried with fresh data")
+        self.assertEqual(attempts, [1, 2])

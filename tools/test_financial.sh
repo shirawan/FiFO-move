@@ -2,9 +2,26 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/runtime.sh"
 fifo_start_database
+# TransactionCase keeps one repeatable-read fixture transaction for many tests.
+# Automatic vacuum on unrelated tables would intentionally trip the database-
+# wide production guard. Quiet this dedicated development cluster during tests
+# and restore its setting on every normal exit; do not disable the guard.
+fifo_test_sql() {
+    "$FIFO_PG_BIN/psql" -h "$FIFO_RUNTIME_DIR/socket" -p 55432 -U agent -d "$FIFO_DATABASE" -At -v ON_ERROR_STOP=1 -c "$1"
+}
+test "$(fifo_test_sql 'SHOW data_directory')" = "$FIFO_RUNTIME_DIR/pgdata"
+FIFO_TEST_AUTOVACUUM=$(fifo_test_sql 'SHOW autovacuum')
+case "$FIFO_TEST_AUTOVACUUM" in on|off) ;; *) exit 1 ;; esac
+fifo_restore_test_maintenance() {
+    fifo_test_sql "ALTER SYSTEM SET autovacuum = '$FIFO_TEST_AUTOVACUUM'" >/dev/null
+    fifo_test_sql 'SELECT pg_reload_conf()' >/dev/null
+}
+trap fifo_restore_test_maintenance EXIT
+fifo_test_sql "ALTER SYSTEM SET autovacuum = 'off'" >/dev/null
+fifo_test_sql 'SELECT pg_reload_conf()' >/dev/null
 FIFO_TEST_LOG="$FIFO_RUNTIME_DIR/test-$(date -u +%Y%m%dT%H%M%S)-$$.log"
 if fifo_odoo --without-demo -u company_financial_cutover --test-enable \
-    --test-tags=/company_financial_cutover --stop-after-init --http-port=18070 \
+    --test-tags=/company_financial_cutover --stop-after-init --no-http --http-port=18070 --max-cron-threads=0 \
     --logfile="$FIFO_TEST_LOG"; then
     "$FIFO_PYTHON" - "$FIFO_TEST_LOG" <<'PY'
 import pathlib, re, sys

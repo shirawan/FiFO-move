@@ -1,0 +1,46 @@
+<odoo>
+    <record id="purchase_history_list" model="ir.ui.view">
+        <field name="name">company.financial.purchase.history.list</field>
+        <field name="model">company.financial.purchase.history</field>
+        <field name="arch" type="xml">
+            <list create="0" edit="0" delete="0">
+                <field name="name" string="Original order"/><field name="vendor_name" string="Vendor"/>
+                <field name="original_state" string="Original status"/><field name="order_date"/>
+                <field name="company_id" string="New company"/><field name="currency_id"/><field name="amount_total"/>
+                <field name="target_order_id" string="Prepared draft"/>
+            </list>
+        </field>
+    </record>
+    <record id="purchase_history_form" model="ir.ui.view">
+        <field name="name">company.financial.purchase.history.form</field>
+        <field name="model">company.financial.purchase.history</field>
+        <field name="arch" type="xml">
+            <form create="0" edit="0" delete="0" duplicate="0">
+                <header>
+                    <button name="action_prepare_draft" type="object" string="Prepare or view replacement draft"
+                        groups="account.group_account_manager"
+                        confirm="Prepare an unconfirmed draft in the new company? Only orders with no receipts or billed quantities are eligible. Existing products and vendor identities are reused; taxes use the new company's configuration. Cancel the original order before confirming the replacement."/>
+                </header>
+                <sheet>
+                    <div class="alert alert-info" role="status">This is read-only history. No receipt, payment or vendor bill was recreated.
+                        Partially received or billed orders need your purchase manager to review the remaining work.</div>
+                    <h1><field name="name"/></h1>
+                    <group>
+                        <field name="vendor_name"/><field name="original_state"/>
+                        <field name="order_date"/><field name="company_id"/><field name="source_company_name"/>
+                        <field name="currency_id"/><field name="amount_total"/><field name="target_order_id"/>
+                    </group>
+                    <field name="details_html" nolabel="1"/>
+                    <field name="original_note" invisible="not original_note"/>
+                </sheet>
+            </form>
+        </field>
+    </record>
+    <record id="purchase_history_action" model="ir.actions.act_window">
+        <field name="name">Migrated purchase history</field>
+        <field name="res_model">company.financial.purchase.history</field>
+        <field name="view_mode">list,form</field>
+    </record>
+    <menuitem id="purchase_history_menu" name="Migrated purchase history" parent="purchase.menu_purchase_root"
+        action="purchase_history_action" groups="purchase.group_purchase_user" sequence="90"/>
+</odoo>

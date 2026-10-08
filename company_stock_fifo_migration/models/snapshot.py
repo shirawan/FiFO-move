@@ -137,6 +137,7 @@ def source_operations_plan(record, company, products, location_ids, quants):
                    "name": line.product_id.display_name, "location": line.location_id.id,
                    "location_name": line.location_id.complete_name, "lot": line.lot_id.id,
                    "quantity": line.quantity_product_uom, "unit": line.product_id.uom_id.display_name,
+                   "unit_decimals": record.env["decimal.precision"].precision_get("Product Unit"),
                    "picked": line.picked, "write": fields.Datetime.to_string(line.write_date)} for line in lines],
     }
 

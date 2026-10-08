@@ -8,7 +8,7 @@ from odoo.exceptions import AccessError, UserError
 from .execution import opening_chunks, execute_cutover, lock_cutover_tables
 from .migration import _SYSTEM_CONTEXT, _SYSTEM_TOKEN, fingerprint
 from .destination import product_matches, location_matches
-from .presentation import product_preview_table
+from .presentation import product_preview_table, format_quantity
 from .snapshot import (company_model, LOCATION_ROLES, LOT_FIELDS, source_operations_plan,
                        source_product_plans, build_snapshot, reviewed_allocations, target_stock_state)
 
@@ -99,9 +99,9 @@ class WholeWarehouseCutover(models.Model):
                     % (len(plan["operations"]), len(plan["lines"]))
                     + '<table class="table table-sm"><thead><tr><th>Operation</th><th>Product</th>'
                     '<th>Location</th><th>Reserved quantity</th></tr></thead><tbody>'
-                    + "".join("<tr><td>%s</td><td>%s</td><td>%s</td><td>%g %s</td></tr>" % (
+                    + "".join("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s %s</td></tr>" % (
                         escape(names[row["move"]]), escape(row["name"]), escape(row["location_name"]),
-                        row["quantity"], escape(row["unit"]),
+                        format_quantity(row["quantity"], row.get("unit_decimals")), escape(row["unit"]),
                     ) for row in plan["lines"][:50]) + "</tbody></table>"
                 )
             cutover.preview_html = preview_html
@@ -315,6 +315,7 @@ class WholeWarehouseCutover(models.Model):
                     value += take * row["unit_value"]
                 remaining -= take
             rows.append({"source": product.id, "name": product.display_name, "unit": product.uom_id.name,
+                         "unit_decimals": self.env["decimal.precision"].precision_get("Product Unit"),
                          "target": matched[product.id]["target"],
                          "target_name": matched[product.id]["target_name"],
                          "cost_method": product.cost_method, "valuation": product.valuation,

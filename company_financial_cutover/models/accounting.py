@@ -2,6 +2,9 @@ from odoo import api, fields, models
 from odoo.exceptions import AccessError, UserError
 
 
+_CUTOVER_CREATE_TOKEN = object()
+
+
 class AccountMove(models.Model):
     _inherit = "account.move"
 
@@ -9,12 +12,22 @@ class AccountMove(models.Model):
 
     @api.model_create_multi
     def create(self, vals_list):
-        if any(vals.get("financial_cutover_id") for vals in vals_list):
-            raise AccessError("Financial cutover links are system-managed.")
+        capability = self.env.context.get("_financial_cutover_create")
+        for vals in vals_list:
+            if vals.get("financial_cutover_id") and not (
+                isinstance(capability, tuple) and len(capability) == 2
+                and capability[0] is _CUTOVER_CREATE_TOKEN
+                and capability[1] == vals["financial_cutover_id"]
+            ):
+                raise AccessError("Financial cutover links are system-managed.")
         return super().create(vals_list)
 
     def _create_financial_cutover(self, values):
-        return super().create(values)
+        # Enter at the full model's create(), preserving later addons' hooks.
+        # Object identity cannot be forged by a JSON/RPC context flag.
+        move = self.with_context(_financial_cutover_create=(
+            _CUTOVER_CREATE_TOKEN, values["financial_cutover_id"])).create(values)
+        return move.with_env(self.env)
 
     def write(self, vals):
         if "financial_cutover_id" in vals:
