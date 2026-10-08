@@ -27,6 +27,12 @@ Tax control-account balances move without duplicating tax tags or taxable invoic
 
 ## Setup and guided steps
 
+The screen highlights the next step: **Check existing data → Review amounts →
+Move balances**. Messages explain what needs attention and who can help. Reviewed
+amounts appear directly on the page; account choices stay under **Accounts and
+contacts** and **Accountant setup**. A completed move shows its result and the
+next stock step.
+
 1. Install this addon from your custom addons directory. In Apps, update the Apps
    List and search for **Company Financial Cutover** with the Apps filter removed. Odoo installs its `account` and `purchase` dependencies.
 2. Configure the replacement company's chart, journals and fiscal year correctly.
@@ -35,7 +41,7 @@ Tax control-account balances move without duplicating tax tags or taxable invoic
    database backup and use a restored test copy before the actual cutover.
 3. Sign in as a Settings administrator with Accounting administrator access and
    enable both companies. Open **Accounting/Invoicing → Configuration → Move
-   Financial Opening**. Choose the old company, new company and date. The existing MISC journal is preferred; otherwise a single suitable general journal is selected. Cash-basis and exchange-difference journals are excluded. Retained earnings are selected only when there is one suitable account. Ask your accountant to complete **Accounting setup** when the chart has multiple earnings accounts.
+   Financial Opening**. Choose the old company, new company and date. The existing MISC journal is preferred; otherwise a single suitable general journal is selected. Cash-basis and exchange-difference journals are excluded. Retained earnings are selected only when there is one suitable account. Ask your accountant to complete **Accountant setup** when the chart has multiple earnings accounts.
 4. Click **1. Check existing data**. Matching uses account codes and types
    against the destination's existing chart. Select accounts manually where the
    codes differ. Missing or incompatible account choices block posting; accounts
@@ -56,7 +62,7 @@ Tax control-account balances move without duplicating tax tags or taxable invoic
 7. Finish bank reconciliation in the old company on or before the cutover date. Unsettled outstanding receipts/payments, suspense and interbank-transfer items block the move; these items are not carried individually. Then pause writes, scheduled jobs, queue workers and other users across this database during the cutover window. Ask your Odoo administrator to stop cron workers, including cron workers in other Odoo processes; `--max-cron-threads=0` applies only to the process it starts.
    Click **3. Move balances**. Busy accounting tables, changed
    previews, wrong posting dates or reconciliation differences refuse/roll back
-   the operation. Review **View completed move** and **Amounts to move**.
+   the operation. Review **View opening entry** and **Review amounts**.
    Run the stock cutover afterwards on the same agreed date and with the same
    destination clearing account. Reconcile its inventory/clearing entries before
    starting normal operations in the replacement.
@@ -82,9 +88,9 @@ receipt documents and purchase analytics are not copied into native Purchase
 reports; original records remain in the old company.
 
 For an order with **no received or billed quantities**, open its history and use
-**Prepare or view replacement draft**. This action reuses eligible existing
+**Prepare replacement draft**. This action reuses eligible existing
 vendor/product records, uses the new company's tax configuration, and creates
-one unconfirmed RFQ. Clicking again opens the same draft. Review its taxes,
+one unconfirmed RFQ. After a draft is prepared, **View replacement order** opens that same order. Review its taxes,
 prices, units, expected arrival and company settings before confirming. Cancel
 the original order before confirming the replacement; confirmation is blocked
 until the original is cancelled, and the old order cannot be reconfirmed while
@@ -100,12 +106,16 @@ create or configure products. Move stock first if it must create destination
 products before preparing purchase drafts.
 
 If the financial opening was already completed with an older version, use
-**1. Preview missing purchase orders** on the completed cutover, review the
-Purchase orders tab, then **2. Copy reviewed purchase history**. This copies
+**Review missing purchase orders** on the completed cutover, review the
+Purchase orders tab, then **Copy reviewed purchase history**. This copies
 only missing orders and never reposts the financial opening. Repeating it skips
 existing history. Changed purchase previews block copying.
 
 Limits: 10,000 purchase orders and 50,000 order lines per cutover.
+
+Purchase history shows readable order statuses and **What happens next** for
+each order. Cancelled or already processed orders explain why a replacement
+cannot be prepared automatically. Preview totals show each order's currency.
 
 ### Stock example
 

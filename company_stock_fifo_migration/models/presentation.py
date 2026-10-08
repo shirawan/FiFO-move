@@ -42,8 +42,8 @@ def product_preview_table(snapshot):
     return (
         "<p>Existing stock is kept and the moved quantity is added. "
         "Already in new company and New company total cover all its warehouses, in the product's unit.</p>"
-        '<table class="table table-sm"><thead><tr><th>Product</th><th>Destination action</th>'
+        '<div class="table-responsive"><table class="table table-sm"><thead><tr><th scope="col">Product</th><th scope="col">What will happen</th>'
         '<th>Already in new company</th><th>Moving now</th><th>New company total</th>'
         '<th>Left elsewhere in old company</th><th>Unit</th><th>Opening value</th><th>Source</th>'
-        '</tr></thead><tbody>' + "".join(content) + "</tbody></table>"
+        '</tr></thead><tbody>' + "".join(content) + "</tbody></table></div>"
     )

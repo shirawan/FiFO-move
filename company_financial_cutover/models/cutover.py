@@ -8,6 +8,7 @@ from psycopg2.errors import LockNotAvailable
 
 from odoo import Command, api, fields, models
 from odoo.exceptions import AccessError, ConcurrencyError, UserError
+from odoo.tools import formatLang
 
 
 OPEN_ITEM_TYPES = {"asset_receivable", "liability_payable"}
@@ -26,15 +27,18 @@ class FinancialCutover(models.Model):
     source_company_id = fields.Many2one("res.company", string="Old company", required=True, ondelete="restrict")
     target_company_id = fields.Many2one("res.company", string="New company", required=True, ondelete="restrict")
     currency_id = fields.Many2one(related="source_company_id.currency_id")
-    cutover_date = fields.Date(string="Move balances as of", required=True, default=fields.Date.context_today)
-    journal_id = fields.Many2one("account.journal", string="Destination Opening Journal")
-    retained_earnings_account_id = fields.Many2one("account.account", string="Destination Retained Earnings")
-    offset_account_id = fields.Many2one("account.account", string="Destination Stock Clearing Account",
+    cutover_date = fields.Date(string="Balance date", required=True, default=fields.Date.context_today,
+        help="Include posted balances and unpaid items dated on or before this day. Purchase history is copied at the time you review it.")
+    journal_id = fields.Many2one("account.journal", string="Opening journal",
+        help="Ask your accountant to select the new company's Miscellaneous journal, usually MISC.")
+    retained_earnings_account_id = fields.Many2one("account.account", string="Previous years' earnings account",
+        help="Your accountant chooses where the old company's accumulated profit or loss belongs in the new company.")
+    offset_account_id = fields.Many2one("account.account", string="Stock clearing account",
         help="Balances inventory excluded for the separate stock mover. Use its destination Stock Migration Clearing account.")
     mapping_ids = fields.One2many("company.financial.account.mapping", "cutover_id", copy=False)
     partner_mapping_ids = fields.One2many("company.financial.partner.mapping", "cutover_id", copy=False)
     line_ids = fields.One2many("company.financial.cutover.line", "cutover_id", readonly=True, copy=False)
-    state = fields.Selection([("draft", "Getting ready"), ("preview", "Preview ready"), ("done", "Completed")],
+    state = fields.Selection([("draft", "Getting ready"), ("preview", "Ready to move"), ("done", "Completed")],
         default="draft", required=True, readonly=True, copy=False)
     snapshot_hash = fields.Char(readonly=True, copy=False)
     move_id = fields.Many2one("account.move", readonly=True, copy=False, ondelete="restrict")
@@ -42,7 +46,7 @@ class FinancialCutover(models.Model):
     completed_by = fields.Many2one("res.users", readonly=True, copy=False)
     summary = fields.Text(readonly=True, copy=False)
     check_status = fields.Selection([("unchecked", "Check needed"), ("blocked", "Needs attention"),
-        ("ready", "Ready to preview")], default="unchecked", readonly=True, copy=False)
+        ("ready", "Ready to review")], default="unchecked", readonly=True, copy=False)
     check_report = fields.Text(string="Check results", readonly=True, copy=False)
 
     def _operator(self):
@@ -157,7 +161,7 @@ class FinancialCutover(models.Model):
         if dates["date_from"] != target.compute_fiscalyear_dates(self.cutover_date)["date_from"]:
             raise UserError("Align the companies' fiscal year boundaries before cutover.")
         if not self.journal_id or self.journal_id.type != "general" or not self.journal_id.active:
-            raise UserError("Ask your accountant to choose the new company's Miscellaneous opening journal (normally MISC) in Accounting setup.")
+            raise UserError("Ask your accountant to choose the new company's Miscellaneous opening journal (normally MISC) in Accountant setup.")
         specialized = target.currency_exchange_journal_id | target.tax_cash_basis_journal_id
         if self.journal_id in specialized or self.journal_id.code in {"CABA", "EXCH"}:
             raise UserError("Choose the Miscellaneous journal (normally MISC), rather than the cash-basis or exchange-difference journal.")
@@ -166,7 +170,7 @@ class FinancialCutover(models.Model):
         if self.journal_id.currency_id and self.journal_id.currency_id != target.currency_id:
             raise UserError("Use an opening journal in the destination's accounting currency.")
         if not self.retained_earnings_account_id or self.retained_earnings_account_id.account_type not in {"equity", "equity_unaffected"}:
-            raise UserError("Choose a destination equity account for prior-year retained earnings.")
+            raise UserError("Ask your accountant to choose Previous years' earnings account in Accountant setup. This carries the old company's prior-year retained earnings.")
         self._check_account(self.retained_earnings_account_id, target.currency_id)
         if self.offset_account_id:
             self._check_account(self.offset_account_id, target.currency_id)
@@ -252,7 +256,7 @@ class FinancialCutover(models.Model):
             report.append("Needs attention: %s" % exc)
         else:
             status = "ready"
-            report.append("Checks passed. Next: open the preview and review the amounts before moving.")
+            report.append("Checks passed. Next: click 2. Review amounts and check them with your accountant before moving.")
         self._system_write({"check_status": status, "check_report": "\n\n".join(report)})
         return True
 
@@ -430,7 +434,7 @@ class FinancialCutover(models.Model):
         for row in rows:
             mapping = mappings.get(row["source_account_id"])
             if not mapping:
-                raise UserError("Click Match Accounts and review all source account choices first.")
+                raise UserError("Click 1. Check existing data, then review the choices in Accounts and contacts.")
             source = mapping.source_account_id
             if mapping.handled_by_stock:
                 if source.account_type not in {"asset_current", "asset_non_current"} or row["kind"] == "open_item":
@@ -494,8 +498,10 @@ class FinancialCutover(models.Model):
         debit = sum(max(row["balance"], 0) for row in rows if row["kind"] != "stock_excluded")
         credit = sum(max(-row["balance"], 0) for row in rows if row["kind"] != "stock_excluded")
         self._system_write({"state": "preview", "snapshot_hash": digest,
-            "summary": "%d source journal items; %d unpaid items. Opening debit %.2f / credit %.2f. Source history and settings stay in the old company."
-                % (count, sum(row["kind"] == "open_item" for row in rows), debit, credit)})
+            "summary": "%d accounting items checked; %d unpaid customer/vendor items. Opening totals: debit %s / credit %s. These totals must match."
+                % (count, sum(row["kind"] == "open_item" for row in rows),
+                    formatLang(self.env, debit, currency_obj=self.currency_id),
+                    formatLang(self.env, credit, currency_obj=self.currency_id))})
         return True
 
     def _lock(self):
@@ -701,7 +707,7 @@ class PartnerMapping(models.Model):
 
     source_partner_id = fields.Many2one("res.partner", required=True, ondelete="restrict")
     target_partner_id = fields.Many2one("res.partner", ondelete="restrict")
-    create_contact = fields.Boolean(string="Create Destination Contact",
+    create_contact = fields.Boolean(string="Create a new contact",
         help="Create contact identity and address only. Source fiscal positions, payment terms, bank accounts and company settings are not copied.")
     _unique_source = models.Constraint("UNIQUE(cutover_id, source_partner_id)", "Only one choice is allowed per source contact.")
 

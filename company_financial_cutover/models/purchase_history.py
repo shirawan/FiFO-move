@@ -15,6 +15,30 @@ MAX_PURCHASE_LINES = 50000
 _PURCHASE_CREATE_TOKEN = object()
 
 
+def purchase_status_label(state, env):
+    return {
+        "draft": env._("Draft order"), "sent": env._("Sent for quotation"),
+        "to approve": env._("Waiting for approval"), "purchase": env._("Confirmed order"),
+        "done": env._("Completed"), "cancel": env._("Cancelled"),
+    }.get(state, str(state or "").replace("_", " ").capitalize())
+
+
+def purchase_draft_advice(snapshot, env):
+    lines = [line for line in snapshot.get("lines", []) if not line.get("display_type")]
+    if snapshot.get("state") == "cancel":
+        return False, env._("This order was cancelled. Keep it as history; there is no replacement to prepare.")
+    if snapshot.get("dropship"):
+        return False, env._("This order delivers directly to a customer. Ask your purchase manager to review any remaining work.")
+    if not lines:
+        return False, env._("This order has no product lines. Keep it as history.")
+    if any(line.get("downpayment") for line in lines):
+        return False, env._("This order includes a down payment. Ask your purchase manager to review any remaining work.")
+    if any(not float_is_zero(line[key], precision_digits=snapshot.get("unit_decimals", 2))
+            for line in lines for key in ("received", "billed")):
+        return False, env._("Some quantities were already received or billed. Review the remaining quantities below with your purchase manager.")
+    return True, env._("Nothing was received or billed when this history was copied. You can prepare a draft in the new company, then review its products, vendor and taxes. Cancel the old order before confirming the replacement.")
+
+
 class FinancialCutover(models.Model):
     _inherit = "company.financial.cutover"
 
@@ -102,12 +126,15 @@ class FinancialCutover(models.Model):
         for batch in self:
             rows = batch.purchase_preview_data or []
             body = "".join("<tr>" + "".join("<td>%s</td>" % escape(str(value)) for value in (
-                row["name"], row["vendor"], row["state"], len(row["lines"]),
-                format(row["total"], ".%sf" % row.get("currency_decimals", 2)))) + "</tr>" for row in rows)
+                row["name"], row["vendor"], purchase_status_label(row["state"], batch.env), len(row["lines"]),
+                "%s %s" % (format(row["total"], ".%sf" % row.get("currency_decimals", 2)),
+                    self.env["res.currency"].browse(row["currency_id"]).name))) + "</tr>" for row in rows)
             batch.purchase_preview_html = ("<p>All source purchase orders at preview time, including historical and cancelled orders. "
                 "This is a read-only history copy. No order is confirmed, no receipt is created, and no vendor bill is recreated.</p>"
-                "<table class='table table-sm'><thead><tr><th>Order</th><th>Vendor</th><th>Original status</th><th>Lines</th><th>Total in order currency</th>"
-                "</tr></thead><tbody>" + body + "</tbody></table>") if rows else "<p>No purchase orders in this preview.</p>"
+                "<div class='table-responsive'><table class='table table-sm'><thead><tr><th scope='col'>Order</th><th scope='col'>Vendor</th><th scope='col'>Original status</th><th scope='col'>Lines</th><th scope='col'>Order total</th>"
+                "</tr></thead><tbody>" + body + "</tbody></table></div>") if rows else (
+                    "<p>No purchase orders were found for this review.</p>" if batch.purchase_preview_data is not False
+                    else "<p>Click 2. Review amounts to see the purchase orders that will be copied.</p>")
 
     def action_apply(self):
         with self.env.cr.savepoint():
@@ -163,6 +190,9 @@ class PurchaseHistory(models.Model):
     name = fields.Char(required=True, readonly=True)
     vendor_name = fields.Char(readonly=True)
     original_state = fields.Char(readonly=True)
+    original_status_label = fields.Char(string="Original status", compute="_compute_order_guidance")
+    draft_eligible = fields.Boolean(compute="_compute_order_guidance")
+    draft_guidance = fields.Char(string="What happens next", compute="_compute_order_guidance")
     order_date = fields.Datetime(readonly=True)
     currency_id = fields.Many2one("res.currency", required=True, readonly=True)
     amount_total = fields.Monetary(readonly=True)
@@ -171,6 +201,15 @@ class PurchaseHistory(models.Model):
     original_note = fields.Html(compute="_compute_details", sanitize=True, string="Original terms and notes")
     target_order_id = fields.Many2one("purchase.order", readonly=True, copy=False, ondelete="restrict")
     _unique_order = models.Constraint("UNIQUE(company_id, source_company_id, source_order_res_id)", "This purchase order already has migrated history in the new company.")
+
+    @api.depends("original_state", "snapshot", "target_order_id")
+    def _compute_order_guidance(self):
+        for history in self:
+            history.original_status_label = purchase_status_label(history.original_state, history.env)
+            eligible, guidance = purchase_draft_advice(history.snapshot or {}, history.env)
+            history.draft_eligible = eligible and not history.target_order_id
+            history.draft_guidance = (history.env._("A replacement order already exists. Use View replacement order to review it; a second order will not be created.")
+                if history.target_order_id else guidance)
 
     @api.model_create_multi
     def create(self, vals_list):
@@ -193,6 +232,9 @@ class PurchaseHistory(models.Model):
             rows = []
             digits = snapshot.get("unit_decimals", 2)
             for line in snapshot.get("lines", []):
+                if line.get("display_type"):
+                    rows.append("<tr><td colspan='10'>%s</td></tr>" % escape(line["name"]))
+                    continue
                 values = [line["name"], line["unit"], *[
                     float_repr(float_round(value, precision_digits=digits), digits) for value in (line["qty"], line["received"], line["billed"],
                         max(line["qty"] - line["received"], 0), max(line["qty"] - line["billed"], 0))],
@@ -200,10 +242,10 @@ class PurchaseHistory(models.Model):
                     format(line["total"], ".%sf" % snapshot.get("currency_decimals", 2))]
                 rows.append("<tr>" + "".join("<td>%s</td>" % escape(str(v)) for v in values) + "</tr>")
             history.details_html = ("<p>Vendor reference: %s. Original bills: %s. Read-only history captured at approval; remaining quantities reflect that snapshot.</p>"
-                % (escape(snapshot.get("vendor_ref", "")), escape(", ".join(b["name"] or "Draft bill" for b in snapshot.get("bills", []))))
-                + "<table class='table table-sm'><thead><tr><th>Item</th><th>Unit</th><th>Ordered</th><th>Received</th><th>Billed</th>"
-                "<th>Left to receive</th><th>Left to bill</th><th>Unit price</th><th>Original taxes</th><th>Total</th></tr></thead>"
-                "<tbody>" + "".join(rows) + "</tbody></table>")
+                % (escape(snapshot.get("vendor_ref") or history.env._("Not supplied")), escape(", ".join(b["name"] or "Draft bill" for b in snapshot.get("bills", [])) or history.env._("None")))
+                + "<div class='table-responsive'><table class='table table-sm'><thead><tr><th scope='col'>Item</th><th scope='col'>Unit</th><th scope='col'>Ordered</th><th scope='col'>Received</th><th scope='col'>Billed</th>"
+                "<th scope='col'>Left to receive</th><th scope='col'>Left to bill</th><th scope='col'>Unit price</th><th scope='col'>Original taxes</th><th scope='col'>Total</th></tr></thead>"
+                "<tbody>" + "".join(rows) + "</tbody></table></div>")
 
     def action_prepare_draft(self):
         self.ensure_one()
@@ -217,9 +259,7 @@ class PurchaseHistory(models.Model):
                 return self._open_draft()
             snapshot = self.snapshot
             lines = [line for line in snapshot["lines"] if not line["display_type"]]
-            if (snapshot["state"] == "cancel" or snapshot["dropship"] or not lines or any(line["downpayment"] or
-                not float_is_zero(line["received"], precision_digits=snapshot["unit_decimals"]) or
-                not float_is_zero(line["billed"], precision_digits=snapshot["unit_decimals"]) for line in lines)):
+            if not purchase_draft_advice(snapshot, self.env)[0]:
                 raise UserError("This order is cancelled, partially received/billed, a down payment or a dropship order. "
                     "Keep its migrated history and ask your purchase manager to handle remaining work separately; no receipt or bill will be duplicated.")
             source = self.env["purchase.order"].browse(self.source_order_res_id).exists()

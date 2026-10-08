@@ -1,5 +1,7 @@
 from unittest.mock import patch
 
+from lxml import html
+
 from odoo import Command
 from odoo.exceptions import AccessError, UserError
 from odoo.tests import tagged, new_test_user
@@ -96,8 +98,12 @@ class TestPurchaseMigration(FinancialCutoverCase):
         self._invoice()
         original = self._order(confirmed=True)
         history = self._run().purchase_history_ids
+        self.assertTrue(history.draft_eligible)
+        self.assertEqual(history.original_status_label, "Confirmed order")
         history.action_prepare_draft()
         replacement = history.target_order_id
+        self.assertFalse(history.draft_eligible)
+        self.assertIn("already exists", history.draft_guidance)
         self.assertEqual(replacement.state, "draft")
         self.assertEqual(replacement.company_id, self.target)
         self.assertEqual(replacement.order_line.product_qty, 5)
@@ -120,6 +126,8 @@ class TestPurchaseMigration(FinancialCutoverCase):
         self._invoice()
         self._order(confirmed=True, received=2)
         history = self._run().purchase_history_ids
+        self.assertFalse(history.draft_eligible)
+        self.assertIn("already received or billed", history.draft_guidance)
         self.assertEqual(history.snapshot["lines"][0]["received"], 2)
         self.assertIn("Left to receive", history.details_html)
         with self.assertRaisesRegex(UserError, "partially received/billed"):
@@ -142,7 +150,7 @@ class TestPurchaseMigration(FinancialCutoverCase):
         buyer = new_test_user(self.env(context={**self.env.context, "no_reset_password": True}), login="replacement-purchase-reader",
             groups="purchase.group_purchase_user", company_id=self.target.id, company_ids=[Command.set(self.target.ids)])
         visible = history.with_user(buyer).with_context(allowed_company_ids=self.target.ids)
-        self.assertEqual(visible.read(["name", "vendor_name", "details_html"])[0]["name"], history.name)
+        self.assertEqual(visible.read(["name", "vendor_name", "details_html", "original_status_label", "draft_guidance", "draft_eligible"])[0]["name"], history.name)
         with self.assertRaises(AccessError):
             visible.action_prepare_draft()
         outsider = new_test_user(self.env(context={**self.env.context, "no_reset_password": True}), login="other-purchase-reader",
@@ -210,3 +218,35 @@ class TestPurchaseMigration(FinancialCutoverCase):
         with self.assertRaisesRegex(UserError, "Purchase orders changed"):
             batch.action_import_purchases()
         self.assertFalse(batch.purchase_history_ids)
+
+    def test_purchase_preview_distinguishes_currencies_and_escapes_vendor_names(self):
+        self._invoice()
+        euro = self.env.ref("base.EUR")
+        euro.active = True
+        self.vendor.name = '<img src=x onerror="alert(1)">'
+        first = self._order(confirmed=True)
+        second = self._order()
+        second.currency_id = euro
+        second.button_cancel()
+        batch = self._batch()
+        batch.action_match()
+        batch.action_preview()
+        rendered = html.fromstring(batch.purchase_preview_html)
+        self.assertFalse(rendered.xpath("//script|//img"))
+        rows = rendered.xpath("//tbody/tr")
+        by_order = {row.xpath("./td/text()")[0]: row.xpath("./td/text()") for row in rows}
+        self.assertEqual(by_order[first.name][2], "Confirmed order")
+        self.assertEqual(by_order[second.name][2], "Cancelled")
+        self.assertTrue(by_order[first.name][-1].endswith(self.source.currency_id.name))
+        self.assertTrue(by_order[second.name][-1].endswith("EUR"))
+
+    def test_cancelled_history_explains_why_no_replacement_is_available(self):
+        self._invoice()
+        order = self._order()
+        order.button_cancel()
+        history = self._run().purchase_history_ids
+        self.assertFalse(history.draft_eligible)
+        self.assertEqual(history.original_status_label, "Cancelled")
+        self.assertIn("cancelled", history.draft_guidance)
+        with self.assertRaisesRegex(UserError, "cancelled"):
+            history.action_prepare_draft()
