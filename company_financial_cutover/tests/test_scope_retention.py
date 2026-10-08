@@ -263,9 +263,8 @@ class TestScopeAndRetention(PurchaseMigrationCase):
         self.assertFalse(batch.purchase_history_ids)
         purchases = self._purchase_batch()
         purchases.action_match()
-        self.assertEqual(purchases.check_status, "blocked")
-        self.assertIn("duplicate unprocessed purchase orders", purchases.check_report)
-        duplicate.button_cancel()
+        self.assertEqual(purchases.check_status, "ready")
+        self.assertIn("Possible duplicate purchase orders", purchases.check_report)
         self._run(purchases)
         self.assertEqual(len(purchases.purchase_history_ids), 2)
         self.assertFalse(purchases.move_id)
@@ -291,15 +290,14 @@ class TestScopeAndRetention(PurchaseMigrationCase):
             ("company_id", "=", self.target.id)]), 1)
         self.assertTrue(first.report_attachment_id)
 
-    def test_new_duplicate_of_an_already_copied_active_order_blocks(self):
+    def test_new_duplicate_history_is_copied_without_repeating_the_first_copy(self):
         self._order()
         self._run(self._purchase_batch())
         duplicate = self._order()
         repeat = self._purchase_batch()
-        with self.assertRaisesRegex(UserError, "duplicate unprocessed purchase orders"):
-            repeat.action_preview()
-        self.assertFalse(repeat.purchase_history_ids)
-        duplicate.button_cancel()
+        repeat.action_match()
+        self.assertEqual(repeat.check_status, "ready")
+        self.assertIn("Possible duplicate purchase orders", repeat.check_report)
         self._run(repeat)
         self.assertEqual(repeat.purchase_history_ids.source_order_res_id, duplicate.id)
 
@@ -387,13 +385,17 @@ class TestScopeAndRetention(PurchaseMigrationCase):
         with self.assertRaisesRegex(UserError, "already moved to another company"):
             batch.action_preview()
 
-    def test_duplicate_vendor_bills_block_until_the_duplicate_is_reversed(self):
+    def test_duplicate_vendor_bills_remain_separate_without_forcing_source_cleanup(self):
         original = self._invoice("in_invoice", 100)
         duplicate = self._invoice("in_invoice", 100)
         (original | duplicate).write({"ref": "SUPPLIER-2024-1"})
+        before = [(move.id, move.state, move.amount_residual, move.write_date) for move in original | duplicate]
         batch = self._batch()
-        with self.assertRaisesRegex(UserError, "duplicate vendor bills"):
-            batch.action_preview()
-        duplicate._reverse_moves([{"date": self.cutoff, "invoice_date": self.cutoff}], cancel=True)
+        batch.action_match()
+        self.assertEqual(batch.check_status, "ready")
+        self.assertIn("Possible duplicate vendor bills", batch.check_report)
         self._run(batch)
-        self.assertEqual(batch.line_ids.filtered(lambda line: line.kind == "open_item").balance, -100)
+        opening = batch.line_ids.filtered(lambda line: line.kind == "open_item")
+        self.assertEqual(sorted(opening.mapped("balance")), [-100, -100])
+        self.assertEqual(len(opening.posted_line_id), 2)
+        self.assertEqual(before, [(move.id, move.state, move.amount_residual, move.write_date) for move in original | duplicate])

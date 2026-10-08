@@ -129,60 +129,81 @@ class FinancialCutover(models.Model):
         self.line_ids._system_unlink()
         return super().unlink()
 
-    def _validate(self):
+    def _validation_details(self):
         self.ensure_one()
         self._operator()
+        issues = []
         source, target = self.source_company_id, self.target_company_id
         if self.state == "done":
-            raise UserError("This cutover is already completed.")
+            issues.append("This cutover is already completed.")
         if source == target or source.currency_id != target.currency_id:
-            raise UserError("Choose different companies with the same accounting currency.")
+            issues.append("Choose different companies with the same accounting currency.")
         if any(company.sudo().parent_id or company.sudo().all_child_ids for company in (source, target)):
-            raise UserError("Companies with branches need a separately reviewed cutover. "
+            issues.append("Companies with branches need a separately reviewed cutover. "
                 "This mover handles standalone companies; branch balances are not included automatically.")
         if self.cutover_date > fields.Date.context_today(self):
-            raise UserError("The cutover date cannot be in the future.")
+            issues.append("The cutover date cannot be in the future.")
         # Check across all previous destinations, including companies hidden by
         # the current switcher. Reveal only that this accessible source moved.
         if (self.sudo().search_count([("source_company_id", "=", source.id), ("state", "=", "done"), ("include_financial", "=", True)])
             or self.env["ir.config_parameter"].sudo().search_count([("key", "=", self._completion_key())])):
-            raise UserError("This source company already has a completed financial cutover.")
+            issues.append("This source company already has a completed financial cutover.")
         posted = self.env["account.move"].search_count([("company_id", "=", target.id), ("state", "=", "posted")])
         drafts = self.env["account.move"].search_count([("company_id", "=", target.id), ("state", "=", "draft")])
         payments = self.env["account.payment"].search_count([("company_id", "=", target.id),
             ("state", "not in", ["canceled", "rejected"])])
         if posted or drafts or payments:
-            raise UserError("The destination already has posted entries: %s; draft entries: %s; payments: %s. "
+            issues.append("The destination already has posted entries: %s; draft entries: %s; payments: %s. "
                 "Review these existing transactions with your accountant. Use a fresh destination to avoid duplicate balances."
                 % (posted, drafts, payments))
         dates = source.compute_fiscalyear_dates(self.cutover_date)
         if dates["date_from"] != target.compute_fiscalyear_dates(self.cutover_date)["date_from"]:
-            raise UserError("Align the companies' fiscal year boundaries before cutover.")
+            issues.append("Align the companies' fiscal year boundaries before cutover.")
         if not self.journal_id or self.journal_id.type != "general" or not self.journal_id.active:
-            raise UserError("Ask your accountant to choose the new company's Miscellaneous opening journal (normally MISC) in Accountant setup.")
-        specialized = target.currency_exchange_journal_id | target.tax_cash_basis_journal_id
-        if self.journal_id in specialized or self.journal_id.code in {"CABA", "EXCH"}:
-            raise UserError("Choose the Miscellaneous journal (normally MISC), rather than the cash-basis or exchange-difference journal.")
-        if not self.journal_id.filtered_domain(self.journal_id._check_company_domain(target)):
-            raise UserError("The opening journal must belong to the destination company.")
-        if self.journal_id.currency_id and self.journal_id.currency_id != target.currency_id:
-            raise UserError("Use an opening journal in the destination's accounting currency.")
-        if not self.retained_earnings_account_id or self.retained_earnings_account_id.account_type not in {"equity", "equity_unaffected"}:
-            raise UserError("Ask your accountant to choose Previous years' earnings account in Accountant setup. This carries the old company's prior-year retained earnings.")
-        self._check_account(self.retained_earnings_account_id, target.currency_id)
-        if self.offset_account_id:
-            self._check_account(self.offset_account_id, target.currency_id)
-            if self.offset_account_id.account_type != "asset_current":
-                raise UserError("Use the stock mover's Current Assets clearing account for excluded inventory.")
+            issues.append("Ask your accountant to choose the new company's Miscellaneous opening journal (normally MISC) in Accountant setup.")
+        if self.journal_id:
+            specialized = target.currency_exchange_journal_id | target.tax_cash_basis_journal_id
+            if self.journal_id in specialized or self.journal_id.code in {"CABA", "EXCH"}:
+                issues.append("Choose the Miscellaneous journal (normally MISC), rather than the cash-basis or exchange-difference journal.")
+            if not self.journal_id.filtered_domain(self.journal_id._check_company_domain(target)):
+                issues.append("The opening journal must belong to the destination company.")
+            if self.journal_id.currency_id and self.journal_id.currency_id != target.currency_id:
+                issues.append("Use an opening journal in the destination's accounting currency.")
+        return dates["date_from"], issues
+
+    @api.model
+    def _raise_issues(self, title, issues):
+        issues = list(dict.fromkeys(str(issue) for issue in issues if issue))
+        if issues:
+            raise UserError(title + "\n\n" + "\n".join("• " + issue for issue in issues))
+
+    def _validate(self):
+        fiscal_start, issues = self._validation_details()
+        self._raise_issues("Review these move requirements together:", issues)
+        return fiscal_start
+
+    def _validate_stock_clearing(self):
+        target = self.target_company_id
+        account = self.offset_account_id
+        issues = []
+        if not account:
+            issues.append("Select the stock mover's destination Stock Migration Clearing account for excluded inventory.")
+        else:
+            issues.extend(self._account_issues(account, target.currency_id))
+            if account.account_type != "asset_current":
+                issues.append("Use the stock mover's Current Assets clearing account for excluded inventory.")
             parameter = self.env["ir.config_parameter"].sudo().search([
                 ("key", "=", "company_stock_fifo_migration.clearing_account.%s" % target.id)])
             if parameter:
                 if not parameter.value or not parameter.value.isdecimal():
-                    raise UserError("The stock mover's saved clearing-account reference is invalid. Ask your accountant to review it.")
-                if self.offset_account_id.id != int(parameter.value):
-                    raise UserError("The selected stock clearing account differs from the stock mover's saved account. "
+                    issues.append("The stock mover's saved clearing-account reference is invalid. Ask your accountant to review it.")
+                elif account.id != int(parameter.value):
+                    issues.append("The selected stock clearing account differs from the stock mover's saved account. "
                         "Use Connect the stock move or choose the saved account so inventory clearing nets to zero.")
-        return dates["date_from"]
+        self._raise_issues("Review the inventory clearing setup:", issues)
+
+    def _review_notices(self, lines):
+        return self._duplicate_bill_notices(lines.move_id)
 
     def _source_lines(self):
         lines = self.env["account.move.line"].with_company(self.source_company_id).search([
@@ -196,11 +217,11 @@ class FinancialCutover(models.Model):
             raise UserError("No posted source journal items exist on or before the cutover date.")
         if not self.currency_id.is_zero(sum(lines.mapped("balance"))):
             raise UserError("The source trial balance is not balanced; repair it before cutover.")
-        self._check_duplicate_bills(lines.move_id)
         return lines
 
-    def _check_duplicate_bills(self, moves):
+    def _duplicate_bill_notices(self, moves):
         seen = {}
+        notices = []
         for move in moves.filtered(lambda m: m.move_type == "in_invoice" and m.ref):
             reversals = move.reversal_move_ids.filtered(lambda r: r.state == "posted" and r.date <= self.cutover_date
                 and r.move_type == "in_refund" and r.currency_id == move.currency_id)
@@ -209,9 +230,11 @@ class FinancialCutover(models.Model):
             key = (move.partner_id.commercial_partner_id.id, self._identity(move.ref, True),
                 move.currency_id.id, str(move.invoice_date), move.amount_total)
             if key in seen:
-                raise UserError("Possible duplicate vendor bills in the old company: %s and %s use the same vendor reference, date, currency and total. Ask your accountant to correct or review the old bills before moving financial balances. They will not be silently merged or removed."
+                notices.append("Possible duplicate vendor bills: %s and %s. Both remain separate ledger items and are included at their recorded balances. Review them with your accountant; copying balances does not create new bills or correct old ones."
                     % (seen[key].display_name, move.display_name))
             seen[key] = move
+
+        return notices
 
     def action_match(self):
         """Prepare editable choices without creating destination business records."""
@@ -220,10 +243,11 @@ class FinancialCutover(models.Model):
         self._invalidate_preview()
         if not self.include_financial:
             return self._check_purchase_only()
-        if self.source_company_id == self.target_company_id:
-            raise UserError("Choose different source and destination companies.")
         self._suggest_settings()
-        lines = self._source_lines()
+        try:
+            lines = self._source_lines()
+        except UserError:
+            lines = self.env["account.move.line"]
         Account = self.env["account.account"].with_company(self.target_company_id)
         account_domain = Account._check_company_domain(self.target_company_id)
         inventory_accounts = self.env["account.account"]
@@ -242,7 +266,8 @@ class FinancialCutover(models.Model):
                 "target_account_id": matches.id if len(matches) == 1 else False,
                 "handled_by_stock": account in inventory_accounts,
             })
-        financial_partners = lines.filtered(lambda l: l.account_id.account_type in OPEN_ITEM_TYPES).partner_id
+        financial_partners = lines.filtered(lambda l: l.account_id.account_type in OPEN_ITEM_TYPES
+            and (not self.currency_id.is_zero(self._residual(l)[0]) or not l.currency_id.is_zero(self._residual(l)[1]))).partner_id
         self._match_contacts(financial_partners | self._purchase_contacts(), financial_partners)
         reused = len(self.partner_mapping_ids.filtered("target_partner_id"))
         new = len(self.partner_mapping_ids.filtered(lambda m: not m.target_partner_id and m.create_contact))
@@ -253,14 +278,25 @@ class FinancialCutover(models.Model):
         if needs_choice:
             report.append("Choose the correct existing contact for: %s. Name alone is not enough to auto-match different records."
                 % ", ".join(needs_choice[:10].source_partner_id.mapped("display_name")))
+        issues = []
         try:
             self._plan()
         except UserError as exc:
-            status = "blocked"
-            report.append("Needs attention: %s" % exc)
+            issues.append(str(exc))
+        # Purchase checks are independent of financial setup. Run them even
+        # when accounting needs attention, rather than revealing them later.
+        try:
+            self._purchase_plan()
+        except UserError as exc:
+            issues.append(str(exc))
+        status = "blocked" if issues else "ready"
+        if issues:
+            report.append("Needs attention before moving:\n" + "\n\n".join(dict.fromkeys(issues)))
         else:
-            status = "ready"
-            report.append("Checks passed. Next: click 2. Review selected data and check the financial amounts with your accountant before moving.")
+            report.append("Checks passed. Review the financial amounts with your accountant before moving.")
+        notices = self._review_notices(lines)
+        if notices:
+            report.append("For review — these notices do not block copying:\n" + "\n".join("• " + note for note in notices))
         self._system_write({"check_status": status, "check_report": "\n\n".join(report)})
         return True
 
@@ -319,11 +355,16 @@ class FinancialCutover(models.Model):
         return identified and all(not source[field] or self._identity(source[field], True) == self._identity(target[field], True)
             for field in ("vat", "ref"))
 
-    def _check_account(self, account, currency):
+    def _account_issues(self, account, currency):
+        issues = []
         if not account.active or not account.filtered_domain(account._check_company_domain(self.target_company_id)):
-            raise UserError("Every destination account must be active and available to the destination company.")
+            issues.append("Every destination account must be active and available to the destination company.")
         if account.currency_id and account.currency_id != currency:
-            raise UserError("A destination account's forced currency does not match the reviewed opening amount.")
+            issues.append("A destination account's forced currency does not match the reviewed opening amount.")
+        return issues
+
+    def _check_account(self, account, currency):
+        self._raise_issues("Review the destination account:", self._account_issues(account, currency))
 
     def _residual(self, line):
         """Reconstruct unpaid amounts by accounting date, including later-settled items."""
@@ -334,7 +375,7 @@ class FinancialCutover(models.Model):
             line.currency_id.round(line.amount_currency - sum(debit.mapped("debit_amount_currency")) + sum(credit.mapped("credit_amount_currency"))),
         )
 
-    def _check_bank_settlement(self, lines):
+    def _bank_settlement_issues(self, lines):
         """Aggregated ledger balances cannot replace outstanding payment items."""
         source = self.source_company_id
         journals = self.env["account.journal"].with_company(source).search([
@@ -347,13 +388,16 @@ class FinancialCutover(models.Model):
         for key in ("account_journal_payment_debit_account_id", "account_journal_payment_credit_account_id"):
             accounts |= template.ref(key, raise_if_not_found=False) or self.env["account.account"]
         accounts = accounts.filtered(lambda a: a.account_type not in OPEN_ITEM_TYPES | {"asset_cash"})
+        issues = []
         for line in lines.filtered(lambda l: l.account_id in accounts):
             balance, foreign = self._residual(line)
             if not self.currency_id.is_zero(balance) or not line.currency_id.is_zero(foreign):
-                raise UserError("Finish bank reconciliation and outstanding receipts/payments in the old company "
+                issues.append("Finish bank reconciliation and outstanding receipts/payments in the old company "
                     "on or before the cutover date. Unsettled item: %s on %s. "
                     "These items cannot be carried as a lump balance without losing the items to match."
                     % (line.move_id.display_name, line.account_id.display_name))
+
+        return issues
 
     def _signature(self, record, names):
         """Hash actual settings too: write_date can be unchanged within a second."""
@@ -373,9 +417,13 @@ class FinancialCutover(models.Model):
             "street", "street2", "city", "zip", "email", "phone", "website", "lang", "ref", "country_id", "state_id"))
 
     def _plan(self):
-        fiscal_start = self._validate()
-        lines = self._source_lines()
-        self._check_bank_settlement(lines)
+        fiscal_start, issues = self._validation_details()
+        try:
+            lines = self._source_lines()
+        except UserError as exc:
+            issues.append(str(exc))
+            self._raise_issues("Review these move requirements together:", issues)
+        issues.extend(self._bank_settlement_issues(lines))
         mappings = {m.source_account_id.id: m for m in self.mapping_ids}
         partners = {m.source_partner_id.id: m for m in self.partner_mapping_ids}
         grouped = defaultdict(lambda: [0.0, 0.0])
@@ -403,26 +451,31 @@ class FinancialCutover(models.Model):
                 if self.currency_id.is_zero(balance) and currency.is_zero(amount_currency):
                     continue
                 if not line.partner_id:
-                    raise UserError("Every unpaid customer/vendor item needs a partner. Missing on %s." % line.move_id.display_name)
-                if "on_payment" in line.move_id.invoice_line_ids.tax_ids.flatten_taxes_hierarchy().mapped("tax_exigibility"):
-                    raise UserError("Unpaid cash-basis tax invoices need a separate accountant-reviewed tax migration. This opening would otherwise lose their future tax recognition: %s." % line.move_id.display_name)
-                mapping = partners.get(line.partner_id.id)
-                if not mapping or (not mapping.target_partner_id and not mapping.create_contact):
-                    raise UserError("Review the missing or ambiguous destination contact for %s. Name-only matches require an explicit choice; only a tax ID, reference or the same shared record permits automatic reuse." % line.partner_id.display_name)
-                if mapping.target_partner_id and (not mapping.target_partner_id.active or mapping.target_partner_id.company_id not in (self.env["res.company"], self.target_company_id)):
-                    raise UserError("The existing destination contact for %s is archived or belongs to another company. Review or reactivate it instead of creating a duplicate." % line.partner_id.display_name)
-                if not mapping.target_partner_id:
-                    if self._contact_candidates(line.partner_id, contact_pool):
-                        raise UserError("An existing or archived contact may match %s. Select and review the existing contact before moving; a duplicate will not be created." % line.partner_id.display_name)
-                    for field in ("vat", "ref", "name"):
-                        identity = self._identity(line.partner_id[field], field != "name")
-                        if not identity:
-                            continue
-                        key = (field, line.partner_id.is_company, identity)
-                        other = proposed.get(key)
-                        if other and other != line.partner_id.id:
-                            raise UserError("Two source contacts may represent %s. Choose an existing destination contact for both, or ask your accountant to resolve their identities first." % line.partner_id.display_name)
-                        proposed[key] = line.partner_id.id
+                    issues.append("Every unpaid customer/vendor item needs a partner. Missing on %s." % line.move_id.display_name)
+                mapping = self.env["company.financial.partner.mapping"]
+                if line.partner_id:
+                    if "on_payment" in line.move_id.invoice_line_ids.tax_ids.flatten_taxes_hierarchy().mapped("tax_exigibility"):
+                        issues.append("Unpaid cash-basis tax invoices need a separate accountant-reviewed tax migration. This opening would otherwise lose their future tax recognition: %s." % line.move_id.display_name)
+                    mapping = partners.get(line.partner_id.id)
+                    if not mapping or (not mapping.target_partner_id and not mapping.create_contact):
+                        issues.append("Review the missing or ambiguous destination contact for %s. Name-only matches require an explicit choice; only a tax ID, reference or the same shared record permits automatic reuse." % line.partner_id.display_name)
+                        # Keep the account requirement visible even when its contact
+                        # is unresolved. Rows are never posted while issues exist.
+                        mapping = mapping or self.env["company.financial.partner.mapping"]
+                    if mapping.target_partner_id and (not mapping.target_partner_id.active or mapping.target_partner_id.company_id not in (self.env["res.company"], self.target_company_id)):
+                        issues.append("The existing destination contact for %s is archived or belongs to another company. Review or reactivate it instead of creating a duplicate." % line.partner_id.display_name)
+                    if not mapping.target_partner_id and mapping.create_contact:
+                        if self._contact_candidates(line.partner_id, contact_pool):
+                            issues.append("An existing or archived contact may match %s. Select and review the existing contact before moving; a duplicate will not be created." % line.partner_id.display_name)
+                        for field in ("vat", "ref", "name"):
+                            identity = self._identity(line.partner_id[field], field != "name")
+                            if not identity:
+                                continue
+                            key = (field, line.partner_id.is_company, identity)
+                            other = proposed.get(key)
+                            if other and other != line.partner_id.id:
+                                issues.append("Two source contacts may represent %s. Choose an existing destination contact for both, or ask your accountant to resolve their identities first." % line.partner_id.display_name)
+                            proposed[key] = line.partner_id.id
                 rows.append({
                     "source_account_id": account.id, "source_line_id": line.id,
                     "source_partner_id": line.partner_id.id,
@@ -439,7 +492,7 @@ class FinancialCutover(models.Model):
                 grouped[(account.id, currency.id)][1] += line.amount_currency
         for account_id, total in source_arap.items():
             if not self.currency_id.is_zero(total - residual_arap[account_id]):
-                raise UserError("Unpaid items do not reconcile to the source customer/vendor control account.")
+                issues.append("Unpaid items do not reconcile to the source customer/vendor control account.")
         for (account_id, currency_id), (balance, amount_currency) in sorted(grouped.items()):
             currency = self.env["res.currency"].browse(currency_id)
             balance, amount_currency = self.currency_id.round(balance), currency.round(amount_currency)
@@ -454,22 +507,25 @@ class FinancialCutover(models.Model):
         for row in rows:
             mapping = mappings.get(row["source_account_id"])
             if not mapping:
-                raise UserError("Click 1. Check existing data, then review the choices under Review matches.")
+                issues.append("Select a destination account for %s under Review matches." % self.env["account.account"].browse(row["source_account_id"]).display_name)
+                continue
             source = mapping.source_account_id
             if mapping.handled_by_stock:
                 if source.account_type not in {"asset_current", "asset_non_current"} or row["kind"] == "open_item":
-                    raise UserError("Only inventory asset balances may be excluded for the stock cutover.")
+                    issues.append("Only inventory asset balances may be excluded for the stock cutover.")
                 row.update({"kind": "stock_excluded", "target_account_id": False})
                 excluded += row["balance"]
             else:
                 target = mapping.target_account_id
                 if not target:
-                    raise UserError("Select a destination account for %s; missing or ambiguous codes are never guessed." % source.display_name)
-                self._check_account(target, self.env["res.currency"].browse(row["currency_id"]))
+                    issues.append("Select a destination account for %s; missing or ambiguous codes are never guessed." % source.display_name)
+                    continue
+                issues.extend("%s: %s" % (source.display_name, issue) for issue in
+                    self._account_issues(target, self.env["res.currency"].browse(row["currency_id"])))
                 if source.account_type != target.account_type:
-                    raise UserError("Source and destination account types must match; review the destination chart before proceeding.")
+                    issues.append("%s: Source and destination account types must match; review the destination chart before proceeding." % source.display_name)
                 if row["kind"] == "open_item" and not target.reconcile:
-                    raise UserError("Customer/vendor destination accounts must allow reconciliation.")
+                    issues.append("%s: Customer/vendor destination accounts must allow reconciliation." % source.display_name)
                 row["target_account_id"] = target.id
             account_evidence.append([
                 self._account_signature(source, self.source_company_id),
@@ -477,21 +533,29 @@ class FinancialCutover(models.Model):
             ])
         previous_profit = self.currency_id.round(previous_profit)
         if not self.currency_id.is_zero(previous_profit):
+            retained = self.retained_earnings_account_id
+            if not retained or retained.account_type not in {"equity", "equity_unaffected"}:
+                issues.append("Ask your accountant to choose Previous years' earnings account in Accountant setup. This carries the old company's prior-year retained earnings.")
+            elif retained:
+                issues.extend(self._account_issues(retained, self.currency_id))
             rows.append({"target_account_id": self.retained_earnings_account_id.id, "currency_id": self.currency_id.id,
                 "balance": previous_profit, "amount_currency": previous_profit,
                 "label": "Prior-year profit/loss brought forward", "kind": "retained"})
         excluded = self.currency_id.round(excluded)
         if not self.currency_id.is_zero(excluded):
-            if not self.offset_account_id:
-                raise UserError("Select the stock mover's destination Stock Migration Clearing account for excluded inventory.")
+            try:
+                self._validate_stock_clearing()
+            except UserError as exc:
+                issues.append(str(exc))
             rows.append({"target_account_id": self.offset_account_id.id, "currency_id": self.currency_id.id,
                 "balance": excluded, "amount_currency": excluded,
                 "label": "Inventory carried separately by stock cutover", "kind": "stock_clearing"})
         included = [row for row in rows if row["kind"] != "stock_excluded"]
-        if not included or len(included) > MAX_OPENING_LINES:
-            raise UserError("The preview must contain between 1 and 10,000 destination journal items.")
-        if not self.currency_id.is_zero(sum(row["balance"] for row in included)):
-            raise UserError("The generated opening does not balance. No rounding or write-off line is added to hide differences.")
+        if not issues and (not included or len(included) > MAX_OPENING_LINES):
+            issues.append("The preview must contain between 1 and 10,000 destination journal items.")
+        if not issues and not self.currency_id.is_zero(sum(row["balance"] for row in included)):
+            issues.append("The generated opening does not balance. No rounding or write-off line is added to hide differences.")
+        self._raise_issues("Review these move requirements together:", issues)
         evidence = {
             "companies": [self._signature(c, ("name", "currency_id", "parent_id", "fiscalyear_last_day", "fiscalyear_last_month", "account_fiscal_country_id"))
                 for c in (self.source_company_id | self.target_company_id)],
@@ -675,7 +739,8 @@ class FinancialCutover(models.Model):
             # No external ID: retain the completion marker across addon reinstall.
             self.env["ir.config_parameter"].sudo().set_param(self._completion_key(), json.dumps({
                 "move_id": move.id, "cutover_id": self.id, "date": str(self.cutover_date)}))
-        return self.action_open_entry()
+        return {"type": "ir.actions.act_window", "name": "Completed company move",
+            "res_model": self._name, "res_id": self.id, "view_mode": "form"}
 
     def action_open_entry(self):
         self.ensure_one()

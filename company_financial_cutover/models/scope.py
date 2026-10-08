@@ -72,14 +72,17 @@ class FinancialCutover(models.Model):
     def _validate_purchase_only(self):
         self.ensure_one()
         self._operator()
+        issues = []
         if self.state == "done":
-            raise UserError("This move is already completed. Use Review missing purchase orders to add only missing history.")
+            issues.append("This move is already completed. Use Review missing purchase orders to add only missing history.")
         if self.source_company_id == self.target_company_id:
-            raise UserError("Choose different old and new companies.")
+            issues.append("Choose different old and new companies.")
         if not self.include_purchase_history:
-            raise UserError("Choose financial balances, purchase orders, or both. For stock only, use Open stock mover below.")
+            issues.append("Choose financial balances, purchase orders, or both. For stock only, use Open stock mover below.")
         if any(c.sudo().parent_id or c.sudo().all_child_ids for c in (self.source_company_id, self.target_company_id)):
-            raise UserError("Companies with branches need a separately reviewed move.")
+            issues.append("Companies with branches need a separately reviewed move.")
+
+        self._raise_issues("Review these purchase-copy requirements together:", issues)
 
     def _plan(self):
         if self.include_financial:
@@ -104,11 +107,14 @@ class FinancialCutover(models.Model):
             report.append("Needs attention: %s" % exc)
         else:
             status = "ready"
-            report.append("Purchase checks passed. Click 2. Review selected data. Already copied orders are skipped.")
+            report.append("Purchase checks passed. Already copied orders are skipped.")
             missing = self.partner_mapping_ids.filtered(lambda row: not row.target_partner_id)
             if missing:
                 report.append("Vendors needing a choice: %s. Choose them under Review matches before cancelling original orders. "
                     "You can copy the history now and choose vendors from the saved history later." % len(missing))
+        notices = self._review_notices(self.env["account.move.line"])
+        if notices:
+            report.append("For review — these notices do not block copying:\n" + "\n".join("• " + note for note in notices))
         self._system_write({"check_status": status, "check_report": "\n\n".join(report)})
         return True
 

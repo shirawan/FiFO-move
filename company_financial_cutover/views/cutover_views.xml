@@ -94,8 +94,8 @@
                         <p>Past invoices, bills, payments and tax reports stay available in the old company. Company settings are not copied.</p>
                         <p invisible="not include_financial">Finish bank reconciliation in the old company first. If you are also moving stock, move financial balances first and use the same stock clearing account in both tools.</p>
                     </details>
-                    <group string="Check results" invisible="not check_report or state != 'draft'">
-                        <field name="check_status" widget="badge" nolabel="1"/>
+                    <group string="Check results" col="1" invisible="not check_report">
+                        <field name="check_status" widget="badge" nolabel="1" invisible="state == 'done'"/>
                         <field name="check_report" nolabel="1"/>
                     </group>
                     <div invisible="state == 'draft'" class="mb-3">

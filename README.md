@@ -6,7 +6,7 @@ in the same database.
 - `company_stock_fifo_migration`: Company Stock Cutover 19.0.2.7.7, based on the supplied
   19.0.2.7.3 addon, with a clearer existing-stock preview. Requires Odoo Enterprise `stock_accountant`,
   `product_expiry`, and the separate `company_kit_bom_migration` addon.
-- `company_financial_cutover` 19.0.1.4.1: financial opening balances and unpaid
+- `company_financial_cutover` 19.0.1.5.0: financial opening balances and unpaid
   customer/vendor journal items, plus all purchase orders as read-only destination
   history with explicit draft preparation for eligible unfinished orders. Requires
   Odoo 19 `account` and `purchase`. It uses the new

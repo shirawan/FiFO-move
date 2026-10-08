@@ -40,6 +40,12 @@ def purchase_draft_advice(snapshot, env):
     return True, env._("Nothing was received or billed when this history was copied. Check or choose the destination vendor first. Then cancel the original order in the old company and prepare a replacement draft here. Review the new draft's products, vendor and taxes before confirming it.")
 
 
+def purchase_duplicate_signature(row, identity):
+    return (row["vendor_id"], identity(row["vendor_ref"], True), row["currency_id"], row["date_order"][:10],
+        tuple((line["product_id"], line["qty"], line["uom_id"], line["price"], line["discount"])
+            for line in row["lines"] if not line["display_type"]))
+
+
 class FinancialCutover(models.Model):
     _inherit = "company.financial.cutover"
 
@@ -92,28 +98,43 @@ class FinancialCutover(models.Model):
         markers = self.env["ir.config_parameter"].sudo().search([
             ("key", "in", [purchase_marker_key(self.source_company_id.id, order.id) for order in orders])])
         copied = set(existing.mapped("source_order_res_id"))
+        issues = []
         for parameter in markers:
-            marker = self._read_purchase_marker(parameter)
+            try:
+                marker = self._read_purchase_marker(parameter)
+            except UserError as exc:
+                issues.append(str(exc))
+                continue
             if (marker.get("source_company_id") != self.source_company_id.id
                 or parameter.key != purchase_marker_key(self.source_company_id.id, marker.get("source_order_id"))):
-                raise UserError("A purchase migration marker does not match its source order. Ask your administrator to recover it; no duplicate will be created.")
+                issues.append("A purchase migration marker does not match its source order. Ask your administrator to recover it; no duplicate will be created.")
             if marker["target_company_id"] != self.target_company_id.id:
-                raise UserError("Some purchase orders already moved to another company. Ask your administrator to review the saved migration archive; another copy will not be created.")
+                issues.append("Some purchase orders already moved to another company. Ask your administrator to review the saved migration archive; another copy will not be created.")
             if marker.get("source_order_id") not in copied:
-                raise UserError("Purchase history was previously copied but its history screen is missing. Reinstall or recover its saved archive before continuing; no duplicate copy will be created.")
+                issues.append("Purchase history was previously copied but its history screen is missing. Reinstall or recover its saved archive before continuing; no duplicate copy will be created.")
+        self._raise_issues("Review these purchase-copy requirements together:", issues)
         all_rows = [self._purchase_row(order) for order in orders]
         rows = [row for row in all_rows if row["id"] not in copied]
+        return rows
+
+    def _review_notices(self, lines):
+        notices = super()._review_notices(lines)
+        if not self.include_purchase_history or not self.env.user.has_group("purchase.group_purchase_user"):
+            return notices
+        orders = self.env["purchase.order"].with_company(self.source_company_id).search([
+            ("company_id", "=", self.source_company_id.id)], order="id", limit=MAX_PURCHASE_ORDERS + 1)
+        if len(orders) > MAX_PURCHASE_ORDERS or len(orders.order_line) > MAX_PURCHASE_LINES:
+            return notices
         seen = {}
-        for row in all_rows:
+        for order in orders:
+            row = self._purchase_row(order)
             if not row["vendor_ref"] or not purchase_draft_advice(row, self.env)[0]:
                 continue
-            signature = (row["vendor_id"], self._identity(row["vendor_ref"], True), row["currency_id"], row["date_order"][:10],
-                tuple((line["product_id"], line["qty"], line["uom_id"], line["price"], line["discount"]) for line in row["lines"] if not line["display_type"]))
-            if signature in seen and (row["id"] not in copied or seen[signature]["id"] not in copied):
-                raise UserError("Possible duplicate unprocessed purchase orders: %s and %s have the same vendor reference and items. Ask your purchase manager to cancel the wrong duplicate or correct its reference in the old company before copying. Cancelled orders are kept as history."
-                    % (seen[signature]["name"], row["name"]))
-            seen[signature] = row
-        return rows
+            signature = purchase_duplicate_signature(row, self._identity)
+            if signature in seen:
+                notices.append("Possible duplicate purchase orders: %s and %s. Both are copied as separate history. No active order is created by copying. Before preparing a replacement, your purchase manager must review the originals and any existing destination order." % (seen[signature], row["name"]))
+            seen[signature] = row["name"]
+        return notices
 
     def _purchase_contacts(self):
         if not self.include_purchase_history:
@@ -287,9 +308,14 @@ class PurchaseHistory(models.Model):
             if source and eligible and not history.target_order_id:
                 current = batch._purchase_row(source.sudo())
                 unchanged = all(current[key] == history.snapshot.get(key) for key in ("vendor_id", "currency_id", "lines", "dropship"))
+            draft_issues = []
+            if source and eligible and unchanged and not history.target_order_id:
+                _commands, draft_issues = history._draft_product_commands()
+                draft_issues.extend(history._replacement_duplicate_issues())
+                draft_issues.extend(history._replacement_destination_issues(vendor))
             if history.target_order_id:
                 step = "created"
-            elif not eligible or not source or not unchanged:
+            elif not eligible or not source or not unchanged or draft_issues:
                 step = "manual"
             elif not vendor or not vendor.active or vendor.company_id not in (self.env["res.company"], history.company_id):
                 step = "vendor"
@@ -298,7 +324,9 @@ class PurchaseHistory(models.Model):
             else:
                 step = "prepare"
             history.replacement_step = step
-            if not eligible:
+            if draft_issues:
+                note = "\n".join(dict.fromkeys(draft_issues))
+            elif not eligible:
                 note = advice
             elif not readable:
                 note = history.env._("Ask an authorized operator with access to both companies to review the original order and prepare any replacement.")
@@ -356,6 +384,52 @@ class PurchaseHistory(models.Model):
                 "<th scope='col'>Left to receive</th><th scope='col'>Left to bill</th><th scope='col'>Unit price</th><th scope='col'>Original taxes</th><th scope='col'>Total</th></tr></thead>"
                 "<tbody>" + "".join(rows) + "</tbody></table></div>")
 
+    def _draft_product_commands(self):
+        commands, issues = [], []
+        Product = self.env["product.product"].with_company(self.company_id)
+        for line in (self.snapshot or {}).get("lines", []):
+            if line["display_type"]:
+                continue
+            product = Product.browse(line["product_id"]).exists()
+            if product.company_id and product.company_id != self.company_id:
+                identities = [("default_code", "=", product.default_code)] if product.default_code else []
+                if product.barcode:
+                    identities.append(("barcode", "=", product.barcode))
+                product = Product.search([("company_id", "=", self.company_id.id)]
+                    + ["|"] * (len(identities) - 1) + identities) if identities else Product.browse()
+            if len(product) != 1 or not product.active or not product.purchase_ok or product.uom_id.id != line["uom_id"]:
+                issues.append("Review the existing destination product and unit for %s first. Products and old settings are not copied by this action." % line["name"])
+                continue
+            commands.append(Command.create({"product_id": product.id, "name": line["name"],
+                "product_qty": line["qty"], "product_uom_id": line["uom_id"], "price_unit": line["price"],
+                "discount": line["discount"], "date_planned": line["date_planned"]}))
+        return commands, issues
+
+    def _replacement_duplicate_issues(self):
+        snapshot = self.snapshot or {}
+        if not snapshot.get("vendor_ref"):
+            return []
+        batch = self.cutover_id
+        others = self.env["purchase.order"].with_company(batch.source_company_id).search([
+            ("company_id", "=", batch.source_company_id.id), ("partner_id", "=", snapshot["vendor_id"]),
+            ("state", "!=", "cancel"), ("id", "!=", self.source_order_res_id)])
+        signature = purchase_duplicate_signature(snapshot, batch._identity)
+        duplicates = [order.name for order in others if purchase_draft_advice(batch._purchase_row(order), self.env)[0]
+            and purchase_duplicate_signature(batch._purchase_row(order), batch._identity) == signature]
+        return (["Other active original orders may duplicate this purchase: %s. Ask your purchase manager to choose the correct order and cancel duplicates before preparing one replacement. The saved history can stay unchanged." % ", ".join(duplicates)]
+            if duplicates else [])
+
+    def _replacement_destination_issues(self, vendor):
+        if len(vendor) != 1 or not vendor.active or vendor.company_id not in (self.env["res.company"], self.company_id):
+            return []
+        origin = "Migrated purchase %s/%s" % (self.cutover_id.source_company_id.id, self.source_order_res_id)
+        domain = [("company_id", "=", self.company_id.id), ("partner_id", "=", vendor.id), ("state", "!=", "cancel")]
+        candidates = self.env["purchase.order"].search([*domain, ("origin", "=", origin)])
+        if self.snapshot["vendor_ref"]:
+            candidates |= self.env["purchase.order"].search([*domain, ("partner_ref", "=", self.snapshot["vendor_ref"])])
+        return (["An existing destination purchase order may already represent this order: %s. Review it instead of creating a duplicate." % ", ".join(candidates.mapped("name"))]
+            if candidates else [])
+
     def action_prepare_draft(self):
         self.ensure_one()
         batch = self.cutover_id
@@ -366,49 +440,38 @@ class PurchaseHistory(models.Model):
             batch._lock()
             if self.target_order_id:
                 return self._open_draft()
+            issues = []
             snapshot = self.snapshot
-            lines = [line for line in snapshot["lines"] if not line["display_type"]]
             if not purchase_draft_advice(snapshot, self.env)[0]:
-                raise UserError("This order is cancelled, partially received/billed, a down payment or a dropship order. "
+                issues.append("This order is cancelled, partially received/billed, a down payment or a dropship order. "
                     "Keep its migrated history and ask your purchase manager to handle remaining work separately; no receipt or bill will be duplicated.")
             source = self.env["purchase.order"].browse(self.source_order_res_id).exists()
             if not source:
-                raise UserError("The original order no longer exists. Review its migrated history with your purchase manager.")
-            if source.state != "cancel":
-                raise UserError("Cancel the original order in the old company before preparing its replacement. This keeps two active orders from surviving an addon uninstall.")
-            current = batch._purchase_row(source)
+                issues.append("The original order no longer exists. Review its migrated history with your purchase manager.")
+            if source and source.state != "cancel":
+                issues.append("Cancel the original order in the old company before preparing its replacement. This keeps two active orders from surviving an addon uninstall.")
+            current = batch._purchase_row(source) if source else snapshot
             for key in ("vendor_id", "currency_id", "lines", "dropship"):
                 if current[key] != snapshot[key]:
-                    raise UserError("The original purchase order changed after migration. Review it before preparing a draft.")
+                    issues.append("The original purchase order changed after migration. Review it before preparing a draft.")
             vendor = self.env["res.partner"].browse(snapshot["vendor_id"])
             mapping = batch.partner_mapping_ids.filtered(lambda m: m.source_partner_id == vendor)
             explicit = self.replacement_vendor_id or mapping.target_partner_id
             matches = explicit or batch._contact_candidates(vendor, batch._contact_pool())
+            valid_vendor = (len(matches) == 1 and matches.active
+                and matches.company_id in (self.env["res.company"], self.company_id)
+                and (explicit or batch._contact_compatible(vendor, matches)))
             if (len(matches) != 1 or not matches.active
                 or matches.company_id not in (self.env["res.company"], self.company_id)
                 or not explicit and not batch._contact_compatible(vendor, matches)):
-                raise UserError("Use Choose destination vendor to select the correct existing contact first. Name alone is not enough for automatic matching.")
+                issues.append("Use Choose destination vendor to select the correct existing contact first. Name alone is not enough for automatic matching.")
             origin = "Migrated purchase %s/%s" % (batch.source_company_id.id, self.source_order_res_id)
-            domain = [("company_id", "=", self.company_id.id), ("partner_id", "=", matches.id)]
-            candidates = self.env["purchase.order"].search([*domain, ("origin", "=", origin)])
-            if snapshot["vendor_ref"]:
-                candidates |= self.env["purchase.order"].search([*domain, ("partner_ref", "=", snapshot["vendor_ref"])])
-            if candidates:
-                raise UserError("An existing destination purchase order may already represent this order. Review it instead of creating a duplicate.")
-            commands = []
-            Product = self.env["product.product"].with_company(self.company_id)
-            for line in lines:
-                product = Product.browse(line["product_id"])
-                if product.company_id and product.company_id != self.company_id:
-                    identities = [("default_code", "=", product.default_code)] if product.default_code else []
-                    if product.barcode:
-                        identities.append(("barcode", "=", product.barcode))
-                    product = Product.search([("company_id", "=", self.company_id.id)] + ["|"] * (len(identities) - 1) + identities) if identities else Product.browse()
-                if len(product) != 1 or not product.active or not product.purchase_ok or product.uom_id.id != line["uom_id"]:
-                    raise UserError("Review the existing destination product and unit for %s first. Products and old settings are not copied by this action." % line["name"])
-                commands.append(Command.create({"product_id": product.id, "name": line["name"],
-                    "product_qty": line["qty"], "product_uom_id": line["uom_id"], "price_unit": line["price"],
-                    "discount": line["discount"], "date_planned": line["date_planned"]}))
+            if valid_vendor:
+                issues.extend(self._replacement_destination_issues(matches))
+            commands, product_issues = self._draft_product_commands()
+            issues.extend(product_issues)
+            issues.extend(self._replacement_duplicate_issues())
+            batch._raise_issues("Review these replacement requirements together:", issues)
             position = self.env["account.fiscal.position"].with_company(self.company_id)._get_fiscal_position(matches)
             order = self.env["purchase.order"].with_company(self.company_id).with_context(
                 _financial_purchase_create=_PURCHASE_CREATE_TOKEN).create({

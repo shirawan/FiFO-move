@@ -45,7 +45,7 @@ next stock step.
    database backup and use a restored test copy before the actual cutover.
 3. Sign in as a Settings administrator with Accounting administrator access and
    enable both companies. Open **Accounting/Invoicing → Configuration → Move
-   Company Data**. Choose what to move and the old and new companies. For financial balances, enter the date. The existing MISC journal is preferred; otherwise a single suitable general journal is selected. Cash-basis and exchange-difference journals are excluded. Retained earnings are selected only when there is one suitable account. Ask your accountant to complete **Accountant setup** when the chart has multiple earnings accounts. Financial setup tabs are hidden for purchase-only moves.
+   Company Data**. Choose what to move and the old and new companies. For financial balances, enter the date. The existing MISC journal is preferred; otherwise a single suitable general journal is selected. Cash-basis and exchange-difference journals are excluded. Retained earnings are selected only when there is one suitable account. An earnings choice is needed only when earlier years have a nonzero net profit/loss; multiple earnings accounts do not block a move that does not use one. Financial setup tabs are hidden for purchase-only moves.
 4. Click **1. Check existing data**. Matching uses account codes and types
    against the destination's existing chart. Select accounts manually where the
    codes differ. Missing or incompatible account choices block posting; accounts
@@ -62,7 +62,7 @@ next stock step.
    that addon is installed. Otherwise configure a Current Assets clearing account
    and explicitly use that same account in the stock mover. A mismatch with the stock mover’s saved destination clearing account blocks the financial opening. Inventory is excluded
    from this financial entry and carried through clearing instead.
-6. Read **Check results** and resolve any needs-attention message. Run Check existing data again after editing choices. Click **2. Review selected data**. This creates review/audit rows only, without
+6. Read **Check results**. Independent setup, account and contact problems are listed together; resolve the blocking items. Review notices do not require source cleanup and stay visible during approval. Run Check existing data again after editing choices. Click **2. Review selected data**. This creates review/audit rows only, without
    destination contacts or journals. Reconcile the trial balance, retained
    earnings, stock exclusions and each unpaid item with the accountant. Rebuild
    Preview after any configuration, mapping or accounting changes.
@@ -147,6 +147,23 @@ posts bank +50, stock clearing +100 and equity -150, excluding inventory.
 The stock mover then posts inventory +100 and stock clearing -100. The new
 company ends with bank 50, inventory 100, equity -150 and clearing zero.
 
+## Practical checks
+
+The mover preserves the old company's recorded data. It does not require fixing
+suspected duplicate bills or orders before copying balances/history. Zero-balance
+ledger accounts and fully settled contacts need no destination choice. An unused
+earnings or stock-clearing setting does not block the opening; these accounts
+are validated only when their amounts actually appear in it.
+
+Essential checks still prevent unsafe posting: existing destination accounting,
+invalid account/contact choices for amounts being moved, unbalanced entries,
+unsettled bank-matching items, unsupported cash-basis tax obligations, changed
+previews, and repeated financial moves. Replacement preparation collects known
+vendor, original-order, duplicate and product issues into one message before
+creating anything. The history screen also shows known product/duplicate issues
+before the original is cancelled. Configuration or data changed later may require
+a refreshed check, and native Odoo or other installed modules may reject posting.
+
 ## Duplicates and uninstalling
 
 Already copied source purchase IDs are skipped. Native completion markers survive
@@ -156,15 +173,20 @@ for archive recovery rather than creating another copy. Existing destination
 purchase references also block preparation of a conflicting replacement draft.
 
 Possible repeated vendor bills with the same vendor, normalized reference,
-currency, invoice date and total block the financial move. Possible repeated
-active, unreceived and unbilled orders with the same vendor, reference, order day,
-currency and product/quantity/price details block the purchase move, including
-when a new order matches an active order already copied. Ask the
-accountant or purchase manager to correct references, reverse an erroneous bill,
-or cancel an erroneous order. Fully reversed bills and cancelled purchase orders
-remain historical records. Records without references cannot be reliably
-identified as duplicates. These checks detect suspicious matches; they do not
-automatically merge, delete or correct existing data.
+currency, invoice date and total appear as **review notices**, not cleanup
+requirements. Each recorded unpaid bill stays a separate opening item at its
+actual ledger balance. No source bill is merged, removed, reversed or recreated.
+Possible repeated active, unreceived and unbilled purchase orders also appear as
+review notices. Each new source ID is copied once as its own history, including
+when a new order resembles an earlier copy. Copying history creates no active
+order, receipt or bill.
+
+Before creating an active replacement, the purchase manager must resolve any
+matching active originals and review existing active destination orders. Cancelled
+destination orders do not block a new draft. Fully reversed bills and cancelled
+source purchase orders stay as historical records. Records without references
+cannot be reliably identified as suspected duplicates. These checks do not
+merge or correct existing data.
 
 Completed moves save a readable report and full financial/purchase recovery
 archive as private native Odoo attachments, with native hash manifests and
