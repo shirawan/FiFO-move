@@ -18,21 +18,27 @@
         <field name="arch" type="xml">
             <form duplicate="0">
                 <header>
-                    <button name="action_match" type="object" string="1. Check existing data" class="oe_highlight" invisible="state != 'draft' or check_status == 'ready'"/>
-                    <button name="action_preview" type="object" string="2. Review selected data" class="oe_highlight" invisible="state != 'draft' or check_status != 'ready'"/>
-                    <button name="action_apply" type="object" string="3. Move selected data" class="oe_highlight" invisible="state != 'preview'" confirm="Move only the selected and reviewed data to the new company? Verify your backup and pause activity and scheduled jobs first. Financial balances move only when selected. Purchase orders become read-only history. Existing copies are skipped. This does not move stock."/>
+                    <button name="action_open_stock_mover" type="object" string="Open stock mover" class="oe_highlight" invisible="move_scope != 'stock' or not stock_mover_available"/>
+                    <button name="action_match" type="object" string="1. Check existing data" class="oe_highlight" invisible="move_scope == 'stock' or state != 'draft' or check_status == 'ready'"/>
+                    <button name="action_preview" type="object" string="2. Review selected data" class="oe_highlight" invisible="move_scope == 'stock' or state != 'draft' or check_status != 'ready'"/>
+                    <button name="action_apply" type="object" string="3. Move selected data" class="oe_highlight" invisible="move_scope == 'stock' or state != 'preview'" confirm="Move only the selected and reviewed data to the new company? Verify your backup and pause activity and scheduled jobs first. Financial balances move only when selected. Purchase orders become read-only history. Existing copies are skipped. This does not move stock."/>
                     <button name="action_open_entry" type="object" string="View opening entry" class="oe_highlight" invisible="state != 'done' or not move_id"/>
                     <button name="action_download_move_report" type="object" string="Download completed report" invisible="state != 'done'"/>
-                    <button name="action_match" type="object" string="Check again" invisible="state == 'done' or (state == 'draft' and check_status != 'ready')"/>
-                    <button name="action_preview" type="object" string="Refresh review" invisible="state != 'preview'"/>
+                    <button name="action_match" type="object" string="Check again" invisible="move_scope == 'stock' or state == 'done' or (state == 'draft' and check_status != 'ready')"/>
+                    <button name="action_preview" type="object" string="Refresh review" invisible="move_scope == 'stock' or state != 'preview'"/>
                     <field name="purchase_history_preview_ready" invisible="True"/>
                     <field name="check_status" invisible="True"/>
-                    <field name="state" widget="statusbar" statusbar_visible="draft,preview,done"/>
+                    <field name="state" widget="statusbar" statusbar_visible="draft,preview,done" invisible="move_scope == 'stock'"/>
                 </header>
                 <sheet>
                     <h1>Move to a new company</h1>
-                    <div class="text-muted mb-3">Choose financial balances, purchase orders, or both. Stock has a separate guided move.</div>
-                    <div class="alert alert-info" role="status" invisible="state != 'draft' or check_status != 'unchecked'">
+                    <div class="text-muted mb-3">Choose what you want to move below. The screen adapts to your selection.</div>
+                    <div class="alert alert-info" role="status" invisible="move_scope != 'stock'">
+                        <strong>Stock has its own guided move.</strong>
+                        <p class="mb-0" invisible="not stock_mover_available">Choose the old and new companies, then click Open stock mover to choose warehouses and review quantities and values.</p>
+                        <p class="mb-0" invisible="stock_mover_available">Ask your Odoo administrator to install Company Stock Cutover and its dependencies. Then choose the old and new companies and open the stock mover.</p>
+                    </div>
+                    <div class="alert alert-info" role="status" invisible="move_scope == 'stock' or state != 'draft' or check_status != 'unchecked'">
                         <strong>Step 1 of 3: Choose the companies and check existing data.</strong>
                         <p class="mb-0">Choose the old and new companies and what you want to move. For financial balances, enter the balance date. Then click 1. Check existing data. Checking does not move data.</p>
                     </div>
@@ -59,9 +65,11 @@
                         <p class="mb-0">Financial balances were not changed. Open Purchase orders below to review the copied history and any remaining work.</p>
                     </div>
                     <group string="What do you want to move?">
-                        <field name="include_financial" readonly="state == 'done'"/>
-                        <field name="include_purchase_history" string="Purchase orders (read-only history)" readonly="state == 'done'"/>
+                        <field name="move_scope" readonly="state == 'done'"/>
+                        <field name="include_financial" invisible="True"/>
+                        <field name="include_purchase_history" invisible="True"/>
                     </group>
+                    <field name="move_scope_description" nolabel="1" class="text-muted mb-3"/>
                     <group string="Your move">
                         <group>
                             <field name="source_company_id" readonly="state == 'done'" options="{'no_create': True, 'no_open': True}"/>
@@ -69,13 +77,13 @@
                             <field name="cutover_date" readonly="state == 'done'" invisible="not include_financial"/>
                         </group>
                         <group>
-                            <field name="currency_id" string="Accounting currency" options="{'no_open': True}"/>
+                            <field name="currency_id" string="Accounting currency" options="{'no_open': True}" invisible="move_scope == 'stock'"/>
                             <field name="name" string="Move reference"/>
                         </group>
                     </group>
                     <p class="text-muted" invisible="state == 'done' or not include_financial">Balances include posted items dated on or before the balance date.</p>
                     <p class="text-muted" invisible="state == 'done' or not include_purchase_history">Purchase history includes all orders at review time. Already copied orders are skipped.</p>
-                    <details class="mb-3">
+                    <details class="mb-3" invisible="move_scope == 'stock'">
                         <summary>What moves, and what stays in the old company?</summary>
                         <p>Balances and individual unpaid customer/vendor items become an opening entry in the new company. Included purchase orders become read-only history. Past invoices, bills, payments and tax reports remain available in the old company. Company settings are not copied.</p>
                         <p>Finish bank reconciliation in the old company first. If you are also moving stock, move financial balances first and use the same stock clearing account in both tools.</p>
@@ -174,7 +182,7 @@
                         <separator string="Stock and other modules"/>
                         <field name="stock_mover_available" invisible="True"/>
                         <p>Stock moves separately so you can review warehouses, quantities and values. If you also chose financial balances, complete that move first. Sales, manufacturing and other historical documents remain in the old company.</p>
-                        <button name="action_open_stock_mover" type="object" string="Open stock mover" invisible="not stock_mover_available or (include_financial and state != 'done')"/>
+                        <button name="action_open_stock_mover" type="object" string="Open stock mover" invisible="move_scope == 'stock' or not stock_mover_available or (include_financial and state != 'done')"/>
                         <p class="text-muted" invisible="stock_mover_available">Stock moves require Company Stock Cutover and its dependencies. Ask your Odoo administrator to install them to enable this option.</p>
                     </div>
                     <div class="alert alert-info" role="status" invisible="state != 'done'">

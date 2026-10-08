@@ -3,8 +3,10 @@
 Move financial opening balances and unpaid customer/vendor items from an old
 company into a clean replacement company in the same Odoo 19 database. Source
 accounting history stays in the old company. No old tax, journal or company
-configuration is copied into the replacement. Choose financial balances,
-purchase orders, or both. Stock is available through the separate stock mover.
+configuration is copied into the replacement. The **Move** dropdown offers
+financial balances and unpaid items, purchase orders as read-only history,
+both, or stock. Setup fields adapt to the selection. Stock opens the separate
+warehouse mover; install its dependencies to enable that action.
 Purchase-only moves do not require an empty destination ledger, matching fiscal
 years, or financial account choices, and never create an accounting entry.
 
@@ -72,8 +74,9 @@ next stock step.
 
 ### Purchase orders
 
-Enable **Purchase orders (read-only history)** to include every source purchase
-order in the financial preview and approval. These snapshots preserve order and
+Select **Purchase orders (read-only history)** or **Financial balances and
+purchase orders** in **Move** to include every source purchase order in the
+review and approval. These snapshots preserve order and
 vendor references, status, dates, currency, totals, original terms, products,
 quantities, prices, discounts, original tax labels and bill references. The
 **Review selected data** section shows what will be copied. After completion,

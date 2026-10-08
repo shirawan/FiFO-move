@@ -6,16 +6,18 @@ in the same database.
 - `company_stock_fifo_migration`: Company Stock Cutover 19.0.2.7.7, based on the supplied
   19.0.2.7.3 addon, with a clearer existing-stock preview. Requires Odoo Enterprise `stock_accountant`,
   `product_expiry`, and the separate `company_kit_bom_migration` addon.
-- `company_financial_cutover` 19.0.1.3.0: financial opening balances and unpaid
+- `company_financial_cutover` 19.0.1.3.1: financial opening balances and unpaid
   customer/vendor journal items, plus all purchase orders as read-only destination
   history with explicit draft preparation for eligible unfinished orders. Requires
   Odoo 19 `account` and `purchase`. It uses the new
   company's account configuration and retains the old company's history.
 
-**Move Company Data** lets you choose financial balances, purchase orders, or
-both. Purchase-only moves work with an existing destination ledger and create no
-accounting entries. Stock uses its separate wizard; sales and other historical
-documents stay in the old company.
+**Move Company Data** has one **Move** selection: financial balances and unpaid
+items, purchase orders as read-only history, both, or stock. The screen shows
+only the setup for the chosen option. Purchase-only moves work with an existing
+destination ledger and create no accounting entries. Choosing stock opens its
+separate wizard when installed; sales and other historical documents stay in
+the old company.
 
 Completed native accounting entries and prepared purchase orders remain after
 uninstalling the financial addon. Private native attachments preserve completed

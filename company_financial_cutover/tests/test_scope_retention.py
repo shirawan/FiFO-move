@@ -3,13 +3,61 @@ import json
 from unittest.mock import patch
 
 from odoo.exceptions import AccessError, UserError
-from odoo.tests import tagged, new_test_user
+from odoo.tests import Form, tagged, new_test_user
 
 from .test_purchase_history import PurchaseMigrationCase
 
 
 @tagged("post_install", "-at_install")
 class TestScopeAndRetention(PurchaseMigrationCase):
+    def test_selection_creates_the_chosen_scope_and_preserves_legacy_choices(self):
+        for selection, financial, purchases in (("financial", True, False),
+                ("purchase", False, True), ("both", True, True), ("stock", False, False)):
+            batch = self.env["company.financial.cutover"].create({
+                "source_company_id": self.source.id, "target_company_id": self.target.id,
+                "move_scope": selection})
+            self.assertEqual((batch.include_financial, batch.include_purchase_history), (financial, purchases))
+            self.assertEqual(batch.move_scope, selection)
+        legacy = self._batch()
+        self.assertEqual(legacy.move_scope, "both")
+        legacy.include_purchase_history = False
+        self.assertEqual(legacy.move_scope, "financial")
+
+    def test_selection_change_invalidates_review_and_cannot_change_a_completed_move(self):
+        self._invoice()
+        self._order()
+        batch = self._batch()
+        batch.action_match()
+        batch.action_preview()
+        self.assertTrue(batch.line_ids)
+        with Form(batch) as form:
+            form.move_scope = "purchase"
+            self.assertFalse(form.include_financial)
+            self.assertTrue(form.include_purchase_history)
+            self.assertEqual(form.state, "draft")
+            self.assertEqual(batch.state, "preview")
+            self.assertTrue(batch.line_ids)
+        self.assertEqual(batch.state, "draft")
+        self.assertFalse(batch.line_ids)
+        self.assertFalse(batch.snapshot_hash)
+        self.assertFalse(batch.include_financial)
+        self._run(batch)
+        self.assertFalse(batch.move_id)
+        self.assertTrue(batch.purchase_history_ids)
+        with self.assertRaises(UserError), self.env.cr.savepoint():
+            batch.move_scope = "financial"
+
+    def test_stock_selection_requires_its_addon_without_creating_financial_or_purchase_data(self):
+        batch = self._batch()
+        batch.move_scope = "stock"
+        self.assertFalse(batch.include_financial)
+        self.assertFalse(batch.include_purchase_history)
+        self.assertFalse(batch.stock_mover_available)
+        with self.assertRaisesRegex(UserError, "Stock moves need Company Stock Cutover"):
+            batch.action_open_stock_mover()
+        self.assertFalse(batch.move_id)
+        self.assertFalse(batch.purchase_history_ids)
+
     def _purchase_batch(self):
         batch = self._batch()
         batch.write({"include_financial": False, "journal_id": False, "retained_earnings_account_id": False})

@@ -2,7 +2,7 @@
 import hashlib
 import json
 
-from odoo import fields, models
+from odoo import api, fields, models
 from odoo.exceptions import UserError
 
 
@@ -11,7 +11,59 @@ class FinancialCutover(models.Model):
 
     include_financial = fields.Boolean(string="Financial balances and unpaid items", default=True,
         help="Create the financial opening in a fresh company. Turn this off to copy purchase history without changing accounting.")
+    move_scope = fields.Selection([
+        ("financial", "Financial balances and unpaid items"),
+        ("purchase", "Purchase orders (read-only history)"),
+        ("both", "Financial balances and purchase orders"),
+        ("stock", "Stock (separate guided move)"),
+    ], string="Move", compute="_compute_move_scope", inverse="_inverse_move_scope", required=True,
+        help="Choose one option. The screen shows only the setup needed for your selection.")
+    move_scope_description = fields.Char(compute="_compute_scope_description")
     stock_mover_available = fields.Boolean(compute="_compute_stock_mover_available")
+
+    @api.depends("include_financial", "include_purchase_history")
+    def _compute_move_scope(self):
+        for batch in self:
+            batch.move_scope = {
+                (True, True): "both", (True, False): "financial",
+                (False, True): "purchase", (False, False): "stock",
+            }[(bool(batch.include_financial), bool(batch.include_purchase_history))]
+
+    def _inverse_move_scope(self):
+        for batch in self:
+            if batch.move_scope not in {"financial", "purchase", "both", "stock"}:
+                raise UserError("Choose what you want to move.")
+            batch.write({"include_financial": batch.move_scope in {"financial", "both"},
+                "include_purchase_history": batch.move_scope in {"purchase", "both"}})
+
+    @api.onchange("move_scope")
+    def _onchange_move_scope(self):
+        # Only update the virtual form here. The inverse invalidates the saved
+        # review on save; changing a dropdown must not delete persisted rows.
+        for batch in self:
+            scope = batch.move_scope
+            batch.include_financial = scope in {"financial", "both"}
+            batch.include_purchase_history = scope in {"purchase", "both"}
+            if batch.state != "done":
+                batch.state = "draft"
+                batch.check_status = "unchecked"
+                batch.check_report = False
+                batch.summary = False
+                batch.snapshot_hash = False
+                batch.purchase_preview_data = False
+                batch.purchase_history_preview_ready = False
+                batch.line_ids = False
+
+    @api.depends("move_scope")
+    def _compute_scope_description(self):
+        descriptions = {
+            "financial": "Move opening balances and individual unpaid customer/vendor items. Purchase orders stay in the old company.",
+            "purchase": "Copy purchase orders as read-only history. Accounting balances stay unchanged. Eligible orders can be prepared as replacement drafts later.",
+            "both": "Move opening balances and unpaid items, and copy purchase orders as read-only history. Stock can be moved afterwards.",
+            "stock": "Open the stock mover to choose warehouses and review quantities and values. This screen will not move financial balances or purchase history.",
+        }
+        for batch in self:
+            batch.move_scope_description = descriptions.get(batch.move_scope, "Choose what you want to move.")
 
     def _compute_stock_mover_available(self):
         for batch in self:
@@ -86,11 +138,14 @@ class FinancialCutover(models.Model):
     def action_open_stock_mover(self):
         self.ensure_one()
         self._operator()
+        if self.source_company_id == self.target_company_id:
+            raise UserError("Choose different old and new companies.")
         if "company.stock.warehouse.cutover" not in self.env:
             raise UserError("Stock moves need Company Stock Cutover and its dependencies. Ask your Odoo administrator to install them first.")
         if self.include_financial and self.state != "done":
-            raise UserError("Complete the selected financial opening first, then open the stock mover. For stock only, untick financial balances.")
+            raise UserError("Complete the selected financial opening first, then open the stock mover. To move only stock, select Stock in the Move choice.")
         action = self.env.ref("company_stock_fifo_migration.whole_warehouse_cutover_action").read()[0]
         action.update({"views": [(False, "form")], "context": {
-            **self.env.context, "default_target_company_id": self.target_company_id.id}})
+            **self.env.context, "default_source_company_id": self.source_company_id.id,
+            "default_target_company_id": self.target_company_id.id}})
         return action
