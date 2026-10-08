@@ -1,6 +1,6 @@
 {
     "name": "Company Financial Cutover",
-    "version": "19.0.1.3.1",
+    "version": "19.0.1.4.0",
     "summary": "Move opening balances, unpaid items, and purchase history to a replacement company",
     "category": "Accounting/Accounting",
     "author": "FiFO-move contributors",

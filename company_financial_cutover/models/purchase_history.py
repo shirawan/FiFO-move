@@ -6,7 +6,7 @@ from html import escape
 
 from psycopg2.errors import LockNotAvailable
 from odoo import Command, api, fields, models
-from odoo.exceptions import AccessError, UserError
+from odoo.exceptions import AccessError, ConcurrencyError, UserError
 from odoo.tools.float_utils import float_is_zero, float_repr, float_round
 
 
@@ -37,7 +37,7 @@ def purchase_draft_advice(snapshot, env):
     if any(not float_is_zero(line[key], precision_digits=snapshot.get("unit_decimals", 2))
             for line in lines for key in ("received", "billed")):
         return False, env._("Some quantities were already received or billed. Review the remaining quantities below with your purchase manager.")
-    return True, env._("Nothing was received or billed when this history was copied. Cancel the original order in the old company first, then prepare a replacement draft here. Review the new draft's products, vendor and taxes before confirming it.")
+    return True, env._("Nothing was received or billed when this history was copied. Check or choose the destination vendor first. Then cancel the original order in the old company and prepare a replacement draft here. Review the new draft's products, vendor and taxes before confirming it.")
 
 
 class FinancialCutover(models.Model):
@@ -115,6 +115,17 @@ class FinancialCutover(models.Model):
             seen[signature] = row
         return rows
 
+    def _purchase_contacts(self):
+        if not self.include_purchase_history:
+            return self.env["res.partner"]
+        if not self.env.user.has_group("purchase.group_purchase_user"):
+            raise AccessError("Purchase user access is required when including purchase orders.")
+        orders = self.env["purchase.order"].with_company(self.source_company_id).search([
+            ("company_id", "=", self.source_company_id.id)], limit=MAX_PURCHASE_ORDERS + 1)
+        if len(orders) > MAX_PURCHASE_ORDERS:
+            raise UserError("Purchase migration is limited to 10,000 orders per cutover.")
+        return orders.partner_id
+
     def _plan(self):
         rows, digest, count = super()._plan()
         purchases = self._purchase_plan()
@@ -122,18 +133,13 @@ class FinancialCutover(models.Model):
             sort_keys=True, default=str).encode()).hexdigest()
         return rows, digest, count
 
-    def _lock(self):
-        super()._lock()
+    def _lock_tables(self):
+        tables = super()._lock_tables()
         if self.include_purchase_history:
-            try:
-                with self.env.cr.savepoint():
-                    self.env.cr.execute("LOCK TABLE purchase_order, purchase_order_line, account_tax_purchase_order_line_rel, "
-                        "company_financial_purchase_history, product_product, product_template, uom_uom, decimal_precision "
-                        "IN SHARE ROW EXCLUSIVE MODE NOWAIT")
-            except LockNotAvailable as exc:
-                raise UserError("Purchasing is busy. Pause purchase activity and retry during the maintenance window.") from exc
-            self.env.cr.execute("SELECT txid_current_snapshot()::text")
-            self._assert_fresh_snapshot(self.env.cr.fetchone()[0])
+            tables += ("purchase_order", "purchase_order_line", "account_tax_purchase_order_line_rel",
+                "company_financial_purchase_history", "product_product", "product_template", "uom_uom", "decimal_precision",
+                "account_fiscal_position", "account_fiscal_position_account_tax_rel", "product_supplier_taxes_rel")
+        return tables
 
     def action_preview(self):
         result = super().action_preview()
@@ -221,6 +227,8 @@ class PurchaseHistory(models.Model):
     details_html = fields.Html(compute="_compute_details", sanitize=True)
     original_note = fields.Html(compute="_compute_details", sanitize=True, string="Original terms and notes")
     target_order_id = fields.Many2one("purchase.order", readonly=True, copy=False, ondelete="restrict")
+    replacement_vendor_id = fields.Many2one("res.partner", string="Chosen destination vendor", readonly=True,
+        copy=False, ondelete="restrict")
     _unique_order = models.Constraint("UNIQUE(company_id, source_company_id, source_order_res_id)", "This purchase order already has migrated history in the new company.")
 
     @api.depends("original_state", "snapshot", "target_order_id")
@@ -294,11 +302,12 @@ class PurchaseHistory(models.Model):
                     raise UserError("The original purchase order changed after migration. Review it before preparing a draft.")
             vendor = self.env["res.partner"].browse(snapshot["vendor_id"])
             mapping = batch.partner_mapping_ids.filtered(lambda m: m.source_partner_id == vendor)
-            matches = mapping.target_partner_id or batch._contact_candidates(vendor, batch._contact_pool())
+            explicit = self.replacement_vendor_id or mapping.target_partner_id
+            matches = explicit or batch._contact_candidates(vendor, batch._contact_pool())
             if (len(matches) != 1 or not matches.active
                 or matches.company_id not in (self.env["res.company"], self.company_id)
-                or not mapping.target_partner_id and not batch._contact_compatible(vendor, matches)):
-                raise UserError("Create or review an existing active destination vendor with the same tax ID/reference first. Name alone is not enough.")
+                or not explicit and not batch._contact_compatible(vendor, matches)):
+                raise UserError("Use Choose destination vendor to select the correct existing contact first. Name alone is not enough for automatic matching.")
             origin = "Migrated purchase %s/%s" % (batch.source_company_id.id, self.source_order_res_id)
             domain = [("company_id", "=", self.company_id.id), ("partner_id", "=", matches.id)]
             candidates = self.env["purchase.order"].search([*domain, ("origin", "=", origin)])
@@ -319,16 +328,42 @@ class PurchaseHistory(models.Model):
                     raise UserError("Review the existing destination product and unit for %s first. Products and old settings are not copied by this action." % line["name"])
                 commands.append(Command.create({"product_id": product.id, "name": line["name"],
                     "product_qty": line["qty"], "product_uom_id": line["uom_id"], "price_unit": line["price"],
-                    "discount": line["discount"], "date_planned": line["date_planned"],
-                    "tax_ids": [Command.set(product.supplier_taxes_id.filtered_domain(
-                        product.supplier_taxes_id._check_company_domain(self.company_id)).ids)]}))
+                    "discount": line["discount"], "date_planned": line["date_planned"]}))
+            position = self.env["account.fiscal.position"].with_company(self.company_id)._get_fiscal_position(matches)
             order = self.env["purchase.order"].with_company(self.company_id).with_context(
                 _financial_purchase_create=_PURCHASE_CREATE_TOKEN).create({
                     "company_id": self.company_id.id, "partner_id": matches.id, "currency_id": snapshot["currency_id"],
                     "origin": origin, "partner_ref": snapshot["vendor_ref"], "order_line": commands,
+                    "fiscal_position_id": position.id,
                     "financial_purchase_history_id": self.id})
-            super(PurchaseHistory, self).write({"target_order_id": order.id})
+            # History is deliberately read-only in the public ACL. Only this
+            # validated operator action may save its system-managed link.
+            super(PurchaseHistory, self.sudo()).write({"target_order_id": order.id})
             return self._open_draft()
+
+    def action_choose_vendor(self):
+        self.ensure_one()
+        self.cutover_id._operator()
+        if self.target_order_id:
+            raise UserError("The replacement already exists. Review its vendor on that order.")
+        mapping = self.cutover_id.partner_mapping_ids.filtered(
+            lambda row: row.source_partner_id.id == self.snapshot["vendor_id"])
+        return {"type": "ir.actions.act_window", "name": "Choose destination vendor",
+            "res_model": "company.financial.purchase.vendor.choice", "view_mode": "form", "target": "new",
+            "context": {**self.env.context, "default_history_id": self.id,
+                "default_vendor_id": (self.replacement_vendor_id or mapping.target_partner_id).id}}
+
+    def _choose_vendor(self, vendor):
+        self.ensure_one()
+        self.cutover_id._operator()
+        if not self.env.user.has_group("purchase.group_purchase_user"):
+            raise AccessError("Purchase user access is required to choose a destination vendor.")
+        if self.target_order_id:
+            raise UserError("The replacement already exists. Review its vendor on that order.")
+        if not vendor.exists() or not vendor.active or vendor.company_id not in (self.env["res.company"], self.company_id):
+            raise UserError("Choose an active existing vendor shared with or belonging to the new company.")
+        vendor.check_access("read")
+        return super(PurchaseHistory, self.sudo()).write({"replacement_vendor_id": vendor.id})
 
     def _open_draft(self):
         return {"type": "ir.actions.act_window", "res_model": "purchase.order", "res_id": self.target_order_id.id,
@@ -354,6 +389,8 @@ class PurchaseOrder(models.Model):
             and capability[1] == values["financial_purchase_history_id"]):
             raise AccessError("Migrated purchase links are system-managed.")
         if values.get("state") == "purchase":
+            self._lock_migrated_orders()
+            self._check_original_cancelled()
             for order in self:
                 migrated = self.env["company.financial.purchase.history"].sudo().search([
                     ("source_company_id", "=", order.company_id.id), ("source_order_res_id", "=", order.id),
@@ -361,6 +398,22 @@ class PurchaseOrder(models.Model):
                 if migrated:
                     raise UserError("A replacement draft already exists in the new company. Do not confirm the old order again.")
         return super().write(values)
+
+    def _lock_migrated_orders(self):
+        """Serialize approvals of both sides of a migrated order pair."""
+        self.check_access("write")
+        histories = self.financial_purchase_history_id.sudo() | self.env["company.financial.purchase.history"].sudo().search([
+            ("source_order_res_id", "in", self.ids), ("target_order_id", "!=", False)])
+        if not histories:
+            return
+        orders = self.sudo().browse(list(set(histories.mapped("source_order_res_id")) | set(histories.target_order_id.ids)))
+        orders.flush_recordset(["state"])
+        try:
+            with self.env.cr.savepoint():
+                self.env.cr.execute("SELECT id FROM purchase_order WHERE id = ANY(%s) ORDER BY id FOR UPDATE NOWAIT", [orders.ids])
+        except LockNotAvailable as exc:
+            raise ConcurrencyError("A related purchase order is being updated; retry approval with fresh data.") from exc
+        orders.invalidate_recordset(["state"])
 
     def _restore_purchase_history_link(self, history_id):
         return self.with_context(_financial_purchase_restore=(_PURCHASE_RESTORE_TOKEN, history_id)).write({"financial_purchase_history_id": history_id})
@@ -371,9 +424,27 @@ class PurchaseOrder(models.Model):
         return super().copy(default)
 
     def button_confirm(self):
+        self._check_original_cancelled()
+        return super().button_confirm()
+
+    def _check_original_cancelled(self):
         for order in self.filtered("financial_purchase_history_id"):
             history = order.financial_purchase_history_id
             source = self.sudo().browse(history.source_order_res_id).exists()
             if not source or source.state != "cancel":
                 raise UserError("Cancel the original order in the old company before confirming this replacement, so it cannot be received or billed twice.")
-        return super().button_confirm()
+
+
+class PurchaseVendorChoice(models.TransientModel):
+    _name = "company.financial.purchase.vendor.choice"
+    _description = "Choose destination vendor for a migrated purchase"
+
+    history_id = fields.Many2one("company.financial.purchase.history", required=True, ondelete="cascade")
+    company_id = fields.Many2one(related="history_id.company_id")
+    original_vendor = fields.Char(related="history_id.vendor_name")
+    vendor_id = fields.Many2one("res.partner", string="Use this existing vendor", required=True)
+
+    def action_confirm(self):
+        self.ensure_one()
+        self.history_id._choose_vendor(self.vendor_id)
+        return {"type": "ir.actions.act_window_close"}

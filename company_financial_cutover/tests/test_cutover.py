@@ -2,6 +2,8 @@ from datetime import date
 from unittest.mock import patch
 from uuid import uuid4
 
+import psycopg2
+
 from odoo import Command, api
 from odoo.exceptions import AccessError, ConcurrencyError, UserError
 from odoo.service.model import retrying
@@ -701,43 +703,103 @@ class TestSnapshotFreshness(TransactionCase):
         cursor.execute("SELECT txid_current_snapshot()::text")
         return cursor.fetchone()[0]
 
+    def _marker_key(self):
+        key = "company_financial_cutover.test.snapshot.%s" % uuid4().hex
+        def remove():
+            with self.registry.cursor() as cursor:
+                cursor.execute("DELETE FROM ir_config_parameter WHERE key = %s", [key])
+                cursor.commit()
+        self.addCleanup(remove)
+        return key
+
+    def _insert_marker(self, cursor, key):
+        cursor.execute("INSERT INTO ir_config_parameter (key, value) VALUES (%s, 'snapshot witness')", [key])
+
     def test_new_commit_after_first_read_requires_full_retry(self):
         with self.registry.cursor() as original:
             snapshot = self._snapshot(original)
             with self.registry.cursor() as concurrent:
-                concurrent.execute("SELECT txid_current()")
+                self._insert_marker(concurrent, self._marker_key())
                 concurrent.commit()
             with self.assertRaises(ConcurrencyError):
                 self._check(original, snapshot)
 
     def test_already_running_transaction_committing_requires_full_retry(self):
         with self.registry.cursor() as concurrent, self.registry.cursor() as original:
-            concurrent.execute("SELECT txid_current()")
+            self._insert_marker(concurrent, self._marker_key())
             snapshot = self._snapshot(original)
             concurrent.commit()
             with self.assertRaises(ConcurrencyError):
                 self._check(original, snapshot)
 
     def test_uncommitted_and_own_subtransactions_do_not_require_retry(self):
+        committed_key = self._marker_key()
+        deleted_key = self._marker_key()
+        with self.registry.cursor() as before:
+            self._insert_marker(before, committed_key)
+            self._insert_marker(before, deleted_key)
+            before.commit()
         with self.registry.cursor() as concurrent, self.registry.cursor() as original:
-            concurrent.execute("SELECT txid_current()")
+            self._insert_marker(concurrent, self._marker_key())
             snapshot = self._snapshot(original)
             with original.savepoint():
-                original.execute("SELECT txid_current()")
+                self._insert_marker(original, self._marker_key())
+                original.execute("UPDATE ir_config_parameter SET value = 'own update' WHERE key = %s", [committed_key])
+                original.execute("DELETE FROM ir_config_parameter WHERE key = %s", [deleted_key])
                 self._check(original, snapshot)
             concurrent.rollback()
             self._check(original, snapshot)
 
     def test_commits_before_first_read_are_already_visible(self):
         with self.registry.cursor() as concurrent:
-            concurrent.execute("SELECT txid_current()")
+            self._insert_marker(concurrent, self._marker_key())
             concurrent.commit()
         with self.registry.cursor() as original:
             self._check(original, self._snapshot(original))
 
+    def test_committed_deletion_before_locks_requires_retry(self):
+        key = self._marker_key()
+        with self.registry.cursor() as before:
+            self._insert_marker(before, key)
+            before.commit()
+        with self.registry.cursor() as original:
+            snapshot = self._snapshot(original)
+            with self.registry.cursor() as concurrent:
+                concurrent.execute("DELETE FROM ir_config_parameter WHERE key = %s", [key])
+                concurrent.commit()
+            with self.assertRaises(ConcurrencyError):
+                self._check(original, snapshot)
+
+    def test_committed_update_before_locks_requires_retry(self):
+        key = self._marker_key()
+        with self.registry.cursor() as before:
+            self._insert_marker(before, key)
+            before.commit()
+        with self.registry.cursor() as original:
+            snapshot = self._snapshot(original)
+            with self.registry.cursor() as concurrent:
+                concurrent.execute("UPDATE ir_config_parameter SET value = 'changed' WHERE key = %s", [key])
+                concurrent.commit()
+            with self.assertRaises(ConcurrencyError):
+                self._check(original, snapshot)
+
+    def test_unrelated_assigned_transaction_and_other_database_commit_do_not_retry(self):
+        with self.registry.cursor() as original:
+            snapshot = self._snapshot(original)
+            with self.registry.cursor() as concurrent:
+                concurrent.execute("SELECT txid_current()")
+                concurrent.commit()
+            self._check(original, snapshot)
+            with psycopg2.connect(original._cnx.dsn, dbname="postgres") as other:
+                with other.cursor() as cursor:
+                    cursor.execute("SELECT current_database(), txid_current()")
+                    self.assertEqual(cursor.fetchone()[0], "postgres")
+            self._check(original, snapshot)
+
     def test_real_odoo_retry_loop_refreshes_snapshot_and_rolls_back_first_attempt(self):
         attempts = []
         key = "company_financial_cutover.test.retry.%s" % uuid4().hex
+        concurrent_key = self._marker_key()
         with self.registry.cursor() as original:
             env = api.Environment(original, self.env.uid, self.env.context)
 
@@ -747,7 +809,7 @@ class TestSnapshotFreshness(TransactionCase):
                 if len(attempts) == 1:
                     original.execute("INSERT INTO ir_config_parameter (key, value) VALUES (%s, 'first attempt')", [key])
                     with self.registry.cursor() as concurrent:
-                        concurrent.execute("SELECT txid_current()")
+                        self._insert_marker(concurrent, concurrent_key)
                         concurrent.commit()
                 env["company.financial.cutover"]._assert_fresh_snapshot(snapshot)
                 original.execute("SELECT count(*) FROM ir_config_parameter WHERE key = %s", [key])

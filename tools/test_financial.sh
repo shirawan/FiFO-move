@@ -3,9 +3,9 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/runtime.sh"
 fifo_start_database
 # TransactionCase keeps one repeatable-read fixture transaction for many tests.
-# Automatic vacuum on unrelated tables would intentionally trip the database-
-# wide production guard. Quiet this dedicated development cluster during tests
-# and restore its setting on every normal exit; do not disable the guard.
+# Keep automatic maintenance deterministic in this dedicated test cluster;
+# restore its setting on every normal exit. The production guard checks tuple
+# changes in locked tables, and the suite verifies unrelated commits are ignored.
 fifo_test_sql() {
     "$FIFO_PG_BIN/psql" -h "$FIFO_RUNTIME_DIR/socket" -p 55432 -U agent -d "$FIFO_DATABASE" -At -v ON_ERROR_STOP=1 -c "$1"
 }

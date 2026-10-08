@@ -1,6 +1,5 @@
 import hashlib
 import json
-import logging
 import re
 from collections import defaultdict
 
@@ -8,14 +7,13 @@ from psycopg2.errors import LockNotAvailable
 
 from odoo import Command, api, fields, models
 from odoo.exceptions import AccessError, ConcurrencyError, UserError
-from odoo.tools import formatLang
+from odoo.tools import SQL, formatLang
 
 
 OPEN_ITEM_TYPES = {"asset_receivable", "liability_payable"}
 PROFIT_TYPES = {"income", "income_other", "expense", "expense_depreciation", "expense_direct_cost"}
 MAX_SOURCE_LINES = 100000
 MAX_OPENING_LINES = 10000
-_logger = logging.getLogger(__name__)
 
 
 class FinancialCutover(models.Model):
@@ -244,19 +242,8 @@ class FinancialCutover(models.Model):
                 "target_account_id": matches.id if len(matches) == 1 else False,
                 "handled_by_stock": account in inventory_accounts,
             })
-        partners = lines.filtered(lambda l: l.account_id.account_type in OPEN_ITEM_TYPES).partner_id
-        existing = set(self.partner_mapping_ids.source_partner_id.ids)
-        pool = self._contact_pool()
-        for partner in partners.sorted("id"):
-            if partner.id in existing:
-                continue
-            matches = self._contact_candidates(partner, pool)
-            automatic = len(matches) == 1 and self._contact_compatible(partner, matches)
-            self.env["company.financial.partner.mapping"].create({
-                "cutover_id": self.id, "source_partner_id": partner.id,
-                "target_partner_id": matches.id if automatic else False,
-                "create_contact": not matches,
-            })
+        financial_partners = lines.filtered(lambda l: l.account_id.account_type in OPEN_ITEM_TYPES).partner_id
+        self._match_contacts(financial_partners | self._purchase_contacts(), financial_partners)
         reused = len(self.partner_mapping_ids.filtered("target_partner_id"))
         new = len(self.partner_mapping_ids.filtered(lambda m: not m.target_partner_id and m.create_contact))
         report = ["Existing accounts and contacts are reused wherever a clear match is found.",
@@ -276,6 +263,22 @@ class FinancialCutover(models.Model):
             report.append("Checks passed. Next: click 2. Review selected data and check the financial amounts with your accountant before moving.")
         self._system_write({"check_status": status, "check_report": "\n\n".join(report)})
         return True
+
+    def _match_contacts(self, partners, create_partners=None):
+        """Purchase vendors need explicit choices too, without creating contacts."""
+        create_partners = create_partners or self.env["res.partner"]
+        existing = set(self.partner_mapping_ids.source_partner_id.ids)
+        pool = self._contact_pool()
+        for partner in partners.sorted("id"):
+            if partner.id in existing:
+                continue
+            matches = self._contact_candidates(partner, pool)
+            automatic = len(matches) == 1 and self._contact_compatible(partner, matches)
+            self.env["company.financial.partner.mapping"].create({
+                "cutover_id": self.id, "source_partner_id": partner.id,
+                "target_partner_id": matches.id if automatic else False,
+                "create_contact": not matches and partner in create_partners,
+            })
 
     @staticmethod
     def _identity(value, identifier=False):
@@ -521,20 +524,21 @@ class FinancialCutover(models.Model):
                     formatLang(self.env, credit, currency_obj=self.currency_id))})
         return True
 
+    def _lock_tables(self):
+        return ("account_move", "account_move_line", "account_partial_reconcile", "account_payment",
+            "account_account", "account_journal", "res_partner", "res_company", "res_currency",
+            "account_tax", "account_tax_repartition_line", "res_currency_rate", "ir_config_parameter",
+            "company_financial_cutover", "company_financial_account_mapping",
+            "company_financial_partner_mapping", "company_financial_cutover_line")
+
     def _lock(self):
         self.env.flush_all()
         self.env.cr.execute("SELECT txid_current_snapshot()::text")
         snapshot = self.env.cr.fetchone()[0]
         try:
             with self.env.cr.savepoint():
-                self.env.cr.execute("""
-                    LOCK TABLE account_move, account_move_line, account_partial_reconcile, account_payment,
-                    account_account, account_journal, res_partner, res_company, res_currency,
-                    account_tax, account_tax_repartition_line, res_currency_rate, ir_config_parameter,
-                    company_financial_cutover, company_financial_account_mapping,
-                    company_financial_partner_mapping, company_financial_cutover_line
-                    IN SHARE ROW EXCLUSIVE MODE NOWAIT
-                """)
+                self.env.cr.execute(SQL("LOCK TABLE %s IN SHARE ROW EXCLUSIVE MODE NOWAIT",
+                    SQL(", ").join(SQL.identifier(table) for table in self._lock_tables())))
         except LockNotAvailable as exc:
             raise UserError("Accounting is busy. Stop accounting activity and retry during the cutover maintenance window.") from exc
         self._assert_fresh_snapshot(snapshot)
@@ -547,31 +551,37 @@ class FinancialCutover(models.Model):
         self.env.invalidate_all()
 
     def _assert_fresh_snapshot(self, snapshot):
-        """Restart the whole request if a commit escaped its repeatable-read view.
+        """Compare locked tables with a fresh primary snapshot, including deletes.
 
-        Table locks stop future writes, but a commit between the first ORM read
-        and lock acquisition is invisible to the original transaction. An
-        independent primary cursor sees its status. Check every intervening
-        transaction, including ones already running at the original snapshot,
-        so inserted/deleted rows are covered too. Odoo retries ConcurrencyError
-        with a new transaction; a savepoint alone cannot refresh it.
+        PostgreSQL transaction IDs span databases. Inspect actual tuple versions
+        here instead of rejecting every cluster commit. Own uncommitted tuple
+        versions are excluded: they are intentionally absent from the fresh
+        cursor and cannot have been concurrently changed. Table locks keep the
+        fresh committed view stable until the cutover transaction completes.
         """
-        _xmin, xmax, running = snapshot.split(":")
-        xmax = int(xmax)
-        candidates = {int(xid) for xid in running.split(",") if xid}
         with self.env.registry.cursor() as fresh:
             fresh.execute("SELECT txid_snapshot_xmax(txid_current_snapshot())")
-            latest = fresh.fetchone()[0]
-            if latest - xmax > 1000:
-                raise ConcurrencyError("Accounting snapshot is too old; retry the full request.")
-            candidates.update(range(xmax, latest))
-            if candidates:
-                fresh.execute("SELECT xid FROM unnest(%s::bigint[]) AS xid "
-                    "WHERE txid_status(xid) = 'committed' LIMIT 1", [sorted(candidates)])
-                committed = fresh.fetchone()
-                if committed:
-                    _logger.debug("Cutover snapshot %s is stale: transaction %s committed before locking", snapshot, committed[0])
-                    raise ConcurrencyError("A transaction committed before cutover locks; retry the full request.")
+            anchor = fresh.fetchone()[0]
+            # xmin is 32-bit; snapshot visibility/status functions expect the
+            # epoch-qualified 64-bit ID. Choose the nearest ID to the current
+            # snapshot (normal unfrozen XIDs are less than 2^31 transactions old).
+            xid = SQL("xmin::text::bigint + %s + CASE WHEN xmin::text::bigint - %s > 2147483648 "
+                "THEN -4294967296 WHEN %s - xmin::text::bigint > 2147483648 "
+                "THEN 4294967296 ELSE 0 END", anchor // 4294967296 * 4294967296,
+                anchor % 4294967296, anchor % 4294967296)
+            for table in self._lock_tables():
+                name = SQL.identifier(table)
+                fresh.execute(SQL("SELECT EXISTS (SELECT 1 FROM %s WHERE xmin::text::bigint >= 3 "
+                    "AND NOT txid_visible_in_snapshot(%s, %s::txid_snapshot))", name, xid, snapshot))
+                if fresh.fetchone()[0]:
+                    raise ConcurrencyError("Migration data changed before cutover locks; retry the full request.")
+                self.env.cr.execute(SQL("SELECT ctid::text, xmin::text FROM %s "
+                    "WHERE xmin::text::bigint < 3 OR txid_status(%s) = 'committed'", name, xid))
+                while versions := self.env.cr.fetchmany(1000):
+                    fresh.execute(SQL("SELECT ctid::text, xmin::text FROM %s WHERE ctid = ANY(%s::tid[])",
+                        name, [row[0] for row in versions]))
+                    if set(versions) != set(fresh.fetchall()):
+                        raise ConcurrencyError("Migration data changed before cutover locks; retry the full request.")
 
     def action_prepare_stock_clearing(self):
         self.ensure_one()

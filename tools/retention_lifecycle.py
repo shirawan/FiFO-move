@@ -5,8 +5,8 @@ import os
 from datetime import date
 from pathlib import Path
 
-from odoo import Command
-from odoo.exceptions import UserError
+from odoo import Command, api
+from odoo.exceptions import ConcurrencyError, UserError
 
 assert env.cr.dbname.startswith("fifo_survival_tests_")
 mode = os.environ["FIFO_SURVIVAL_MODE"]
@@ -70,10 +70,12 @@ if mode == "setup":
     purchases.action_apply()
     original.button_cancel()
     history = purchases.purchase_history_ids
+    history._choose_vendor(partner)
     history.action_prepare_draft()
     archives = financial.archive_attachment_id | financial.report_attachment_id | purchases.archive_attachment_id | purchases.report_attachment_id
     data = {"source": source.id, "target": target.id, "invoice": invoice.id,
         "opening": financial.move_id.id, "original": original.id, "replacement": history.target_order_id.id,
+        "chosen_vendor": partner.id,
         "lines": len(financial.line_ids), "history_snapshot": history.snapshot,
         "financial_key": financial.archive_key, "purchase_key": purchases.archive_key,
         "markers": {p.key: p.value for p in demo["ir.config_parameter"].sudo().search([
@@ -89,6 +91,49 @@ elif mode == "uninstall":
     module.button_uninstall()
     env.cr.commit()
     print("SURVIVAL: native Odoo uninstall requested.")
+elif mode == "change_opening":
+    data = json.loads(fixture.read_text())
+    demo = env(context={**env.context, "allowed_company_ids": [data["source"], data["target"]]})
+    opening = demo["account.move"].browse(data["opening"])
+    assert "financial_cutover_id" not in opening._fields
+    opening.button_draft()
+    opening.write({"line_ids": [Command.update(line.id, {
+        "debit": 120 if line.balance > 0 else 0, "credit": 120 if line.balance < 0 else 0,
+        "amount_currency": 120 if line.balance > 0 else -120}) for line in opening.line_ids]})
+    opening.action_post()
+    env.cr.commit()
+    print("SURVIVAL: native opening edited and reposted while addon is uninstalled and absent.")
+elif mode == "approval_race":
+    data = json.loads(fixture.read_text())
+    context = {**env.context, "allowed_company_ids": [data["source"], data["target"]]}
+    demo = env(context=context)
+    replacement = demo["purchase.order"].browse(data["replacement"])
+    replacement.button_cancel()
+    env.cr.commit()
+    try:
+        with env.registry.cursor() as first, env.registry.cursor() as second:
+            old_env = api.Environment(first, env.uid, context)
+            new_env = api.Environment(second, env.uid, context)
+            # Both requests start with a cancelled original and replacement.
+            second.execute("SELECT txid_current_snapshot()")
+            old = old_env["purchase.order"].browse(data["original"])
+            old.button_draft()
+            old.button_confirm()
+            assert old.state == "purchase"
+            try:
+                new_env["purchase.order"].browse(data["replacement"]).button_approve()
+            except ConcurrencyError:
+                pass
+            else:
+                raise AssertionError("Concurrent replacement approval must retry instead of confirming both orders")
+            first.rollback()
+            second.rollback()
+    finally:
+        demo.invalidate_all()
+        replacement.button_draft()
+        env.cr.commit()
+    assert demo["purchase.order"].browse(data["original"]).state == "cancel" and replacement.state == "draft"
+    print("SURVIVAL: native concurrent original/replacement approvals serialize; fixture restored unchanged.")
 else:
     data = json.loads(fixture.read_text())
     demo = env(context={**env.context, "allowed_company_ids": [data["source"], data["target"]]})
@@ -125,6 +170,7 @@ else:
         history = purchases.purchase_history_ids
         assert len(history) == 1 and history.snapshot == data["history_snapshot"]
         assert history.target_order_id == replacement and replacement.financial_purchase_history_id == history
+        assert history.replacement_vendor_id.id == data["chosen_vendor"]
         assert len(demo["company.financial.purchase.history"].search([])) == 1
         demo["company.financial.cutover"]._restore_archives()
         assert demo["company.financial.cutover"].search_count([]) == 2

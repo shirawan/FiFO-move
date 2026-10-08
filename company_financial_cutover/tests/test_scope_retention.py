@@ -2,6 +2,7 @@ import hashlib
 import json
 from unittest.mock import patch
 
+from odoo import Command
 from odoo.exceptions import AccessError, UserError
 from odoo.tests import Form, tagged, new_test_user
 
@@ -10,6 +11,117 @@ from .test_purchase_history import PurchaseMigrationCase
 
 @tagged("post_install", "-at_install")
 class TestScopeAndRetention(PurchaseMigrationCase):
+    def test_purchase_only_name_match_can_be_chosen_before_original_cancellation(self):
+        old = self.env["res.partner"].create({"name": "Local supplier", "company_id": self.source.id})
+        target = self.env["res.partner"].create({"name": "Local supplier", "company_id": self.target.id})
+        original = self._order(confirmed=True)
+        original.partner_id = old
+        batch = self._purchase_batch()
+        batch.action_match()
+        self.assertEqual(batch.partner_mapping_ids.source_partner_id, old)
+        self.assertFalse(batch.partner_mapping_ids.target_partner_id)
+        self.assertIn("vendors need a choice", batch.check_report)
+        with Form(batch) as form:
+            with form.partner_mapping_ids.edit(0) as choice:
+                choice.target_partner_id = target
+        self._run(batch)
+        original.button_cancel()
+        batch.purchase_history_ids.action_prepare_draft()
+        self.assertEqual(batch.purchase_history_ids.target_order_id.partner_id, target)
+        self.assertFalse(batch.move_id)
+
+    def test_completed_history_vendor_choice_handles_missing_legacy_mappings_and_is_archived(self):
+        old = self.env["res.partner"].create({"name": "Local supplier", "company_id": self.source.id})
+        target = self.env["res.partner"].create({"name": "Local supplier", "company_id": self.target.id})
+        original = self._order(confirmed=True)
+        original.partner_id = old
+        batch = self._run(self._purchase_batch())
+        history = batch.purchase_history_ids
+        self.env.cr.execute("DELETE FROM company_financial_partner_mapping WHERE cutover_id = %s", [batch.id])
+        self.env.invalidate_all()
+        operator = new_test_user(self.env(context={**self.env.context, "no_reset_password": True}),
+            login="vendor-choice-operator", groups="base.group_system,account.group_account_manager,purchase.group_purchase_user",
+            company_id=self.source.id, company_ids=[self.source.id, self.target.id])
+        history = history.with_user(operator).with_context(allowed_company_ids=[self.source.id, self.target.id])
+        self.assertFalse(history.env.su)
+        action = history.action_choose_vendor()
+        with Form(history.env[action["res_model"]].with_context(action["context"])) as form:
+            form.vendor_id = target
+        form.record.action_confirm()
+        self.assertEqual(original.state, "purchase")
+        self.assertEqual(history.replacement_vendor_id, target)
+        payload = json.loads(batch.archive_attachment_id.raw)
+        self.assertEqual(payload["purchases"][0]["replacement_vendor_id"], target.id)
+        with self.assertRaisesRegex(UserError, "active existing vendor"):
+            history._choose_vendor(old)
+        target.active = False
+        with self.assertRaisesRegex(UserError, "active existing vendor"):
+            history._choose_vendor(target)
+        target.active = True
+        original.button_cancel()
+        history.action_prepare_draft()
+        self.assertEqual(history.target_order_id.partner_id, target)
+        with self.assertRaisesRegex(UserError, "replacement already exists"):
+            history._choose_vendor(self.vendor)
+        with self.assertRaises(AccessError):
+            history.write({"replacement_vendor_id": self.vendor.id})
+
+    def _remove_financial_history_for_recovery(self, batch):
+        move = batch.move_id
+        self.env.flush_all()
+        self.env.cr.execute("UPDATE account_move SET financial_cutover_id = NULL WHERE id = %s", [move.id])
+        self.env.cr.execute("DELETE FROM company_financial_purchase_history WHERE cutover_id = %s", [batch.id])
+        self.env.cr.execute("DELETE FROM company_financial_cutover WHERE id = %s", [batch.id])
+        self.env.invalidate_all()
+        return move
+
+    def test_recovery_rejects_reposted_opening_with_changed_amounts(self):
+        self._invoice()
+        batch = self._run()
+        archive_key = batch.archive_key
+        move = self._remove_financial_history_for_recovery(batch)
+        move.button_draft()
+        move.write({"line_ids": [Command.update(line.id, {
+            "debit": 120 if line.balance > 0 else 0, "credit": 120 if line.balance < 0 else 0,
+            "amount_currency": 120 if line.balance > 0 else -120}) for line in move.line_ids]})
+        move.action_post()
+        with self.assertRaisesRegex(UserError, "archived financial opening has changed"):
+            self.env["company.financial.cutover"]._restore_archives()
+        self.assertFalse(move.financial_cutover_id)
+        self.assertFalse(self.env["company.financial.cutover"].search([("archive_key", "=", archive_key)]))
+
+    def test_recovery_allows_normal_payment_reconciliation(self):
+        self._invoice()
+        batch = self._run()
+        move = batch.move_id
+        receipt = self._entry(self.target, [("bank", 100), ("receivable", -100, self.customer)])
+        (move | receipt).line_ids.filtered(lambda line: line.account_id.account_type == "asset_receivable").reconcile()
+        self._remove_financial_history_for_recovery(batch)
+        self.env["company.financial.cutover"]._restore_archives()
+        self.assertEqual(move.financial_cutover_id.state, "done")
+        self.assertEqual(move.line_ids.filtered(lambda line: line.account_id.account_type == "asset_receivable").amount_residual, 0)
+
+    def test_old_archive_without_native_signature_still_checks_amounts(self):
+        self._invoice()
+        batch = self._run()
+        payload = json.loads(batch.archive_attachment_id.raw)
+        payload.pop("opening")
+        batch._validate_archived_opening(payload)
+        payload["lines"][0]["balance"] += 20
+        with self.assertRaisesRegex(UserError, "archived financial opening has changed"):
+            batch._validate_archived_opening(payload)
+
+    def test_old_archive_with_excluded_stock_restores_included_line_sequences(self):
+        self._entry(self.source, [("inventory", 100), ("equity", -100)])
+        batch = self._batch()
+        batch.offset_account_id = self.accounts[self.target.id]["clearing"]
+        batch.action_match()
+        batch.mapping_ids.filtered(lambda row: row.source_account_id == self.accounts[self.source.id]["inventory"]).handled_by_stock = True
+        self._run(batch)
+        payload = json.loads(batch.archive_attachment_id.raw)
+        payload.pop("opening")
+        batch._validate_archived_opening(payload)
+
     def test_selection_creates_the_chosen_scope_and_preserves_legacy_choices(self):
         for selection, financial, purchases in (("financial", True, False),
                 ("purchase", False, True), ("both", True, True), ("stock", False, False)):

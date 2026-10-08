@@ -96,6 +96,8 @@ class FinancialCutover(models.Model):
     def _check_purchase_only(self):
         report = ["Purchase orders only: financial balances, invoices, bills and stock will not be changed."]
         try:
+            self._validate_purchase_only()
+            self._match_contacts(self._purchase_contacts())
             self._plan()
         except UserError as exc:
             status = "blocked"
@@ -103,6 +105,10 @@ class FinancialCutover(models.Model):
         else:
             status = "ready"
             report.append("Purchase checks passed. Click 2. Review selected data. Already copied orders are skipped.")
+            missing = self.partner_mapping_ids.filtered(lambda row: not row.target_partner_id)
+            if missing:
+                report.append("Choose destination vendors under Accounts and contacts before cancelling originals for replacement drafts. "
+                    "%s vendors need a choice. You may still copy their read-only history now, and choose a vendor from the saved history later." % len(missing))
         self._system_write({"check_status": status, "check_report": "\n\n".join(report)})
         return True
 

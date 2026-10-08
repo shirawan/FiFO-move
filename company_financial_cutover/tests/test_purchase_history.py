@@ -36,6 +36,56 @@ class PurchaseMigrationCase(FinancialCutoverCase):
 
 @tagged("post_install", "-at_install")
 class TestPurchaseMigration(PurchaseMigrationCase):
+    def test_native_approval_and_state_writes_cannot_reconfirm_replacement_with_active_original(self):
+        self._invoice()
+        original = self._order(confirmed=True)
+        history = self._run().purchase_history_ids
+        original.button_cancel()
+        history.action_prepare_draft()
+        replacement = history.target_order_id
+        replacement.button_cancel()
+        original.button_draft()
+        original.button_confirm()
+        replacement.button_draft()
+        for approve in (replacement.button_confirm, replacement.button_approve,
+                lambda: replacement.write({"state": "purchase"})):
+            with self.assertRaisesRegex(UserError, "Cancel the original order"):
+                approve()
+            self.assertEqual(replacement.state, "draft")
+            self.assertEqual(original.state, "purchase")
+        original.button_cancel()
+        replacement.button_approve()
+        self.assertEqual(replacement.state, "purchase")
+
+    def test_replacement_taxes_follow_destination_vendor_fiscal_position(self):
+        self._invoice()
+        group = self.env["account.tax.group"].with_company(self.target).create({
+            "name": "Destination tax group", "company_id": self.target.id})
+        Tax = self.env["account.tax"].with_company(self.target)
+        base = Tax.create({"name": "Destination purchase 10%", "amount": 10, "type_tax_use": "purchase",
+            "company_id": self.target.id, "tax_group_id": group.id})
+        exempt = Tax.create({"name": "Destination exempt vendor", "amount": 0, "type_tax_use": "purchase",
+            "company_id": self.target.id, "tax_group_id": group.id, "original_tax_ids": [Command.set(base.ids)]})
+        position = self.env["account.fiscal.position"].with_company(self.target).create({
+            "name": "Destination exemption", "company_id": self.target.id, "tax_ids": [Command.set(exempt.ids)]})
+        self.vendor.with_company(self.target).property_account_position_id = position
+        self.product.supplier_taxes_id = [Command.set(base.ids)]
+        original = self._order()
+        history = self._run().purchase_history_ids
+        original.button_cancel()
+        history.action_prepare_draft()
+        replacement = history.target_order_id
+        native = self.env["purchase.order"].with_company(self.target).create({
+            "company_id": self.target.id, "partner_id": self.vendor.id,
+            "order_line": [Command.create({"product_id": self.product.id, "name": "Native control",
+                "product_qty": 5, "price_unit": 10, "product_uom_id": self.product.uom_id.id,
+                "date_planned": "2024-07-01 10:00:00"})]})
+        self.assertEqual(replacement.fiscal_position_id, position)
+        self.assertEqual(replacement.order_line.tax_ids, exempt)
+        self.assertEqual(replacement.order_line.tax_ids, native.order_line.tax_ids)
+        self.assertEqual(replacement.amount_total, native.amount_total)
+        self.assertEqual(replacement.amount_total, 50)
+
     def test_all_order_states_copy_without_creating_orders_or_bills(self):
         self._invoice()
         draft = self._order()

@@ -118,10 +118,10 @@
                         <field name="purchase_preview_html" nolabel="1" invisible="not include_purchase_history or state == 'done'"/>
                     </div>
                     <notebook>
-                        <page string="Accounts and contacts" name="matching_choices" invisible="not include_financial">
-                            <separator string="Accounts"/>
-                            <p>Check existing data fills clear matches. Ask your accountant to choose a new company account wherever a choice is missing. Tick Handled by stock move only for inventory being moved by the stock tool.</p>
-                            <field name="mapping_ids" nolabel="1" readonly="state == 'done'">
+                        <page string="Accounts and contacts" name="matching_choices" invisible="not include_financial and not include_purchase_history">
+                            <separator string="Accounts" invisible="not include_financial"/>
+                            <p invisible="not include_financial">Check existing data fills clear matches. Ask your accountant to choose a new company account wherever a choice is missing. Tick Handled by stock move only for inventory being moved by the stock tool.</p>
+                            <field name="mapping_ids" nolabel="1" readonly="state == 'done'" invisible="not include_financial">
                                 <list editable="bottom" create="0" delete="0" decoration-warning="not target_account_id and not handled_by_stock">
                                     <field name="source_account_id" string="Old company account" readonly="1" options="{'no_create': True}" context="{'allowed_company_ids': [parent.source_company_id]}"/>
                                     <field name="target_account_id" string="Use this new company account" options="{'no_create': True}" context="{'allowed_company_ids': [parent.target_company_id]}" domain="[('company_ids', 'in', [parent.target_company_id])]"/>
@@ -129,12 +129,14 @@
                                 </list>
                             </field>
                             <separator string="Customers and vendors"/>
-                            <p>Clear matches are reused. For a name-only match, choose the correct existing contact yourself. Create a new contact is suggested only when no possible match exists, including archived contacts. Do not tick it to bypass a missing choice.</p>
+                            <p>Clear matches are reused. For a name-only match, choose the correct existing contact yourself.</p>
+                            <p invisible="not include_financial">Create a new contact is suggested only when no possible match exists, including archived contacts. Do not tick it to bypass a missing choice.</p>
+                            <p invisible="not include_purchase_history">Before cancelling an original purchase order, choose its destination vendor. After copying history, you can also use Choose destination vendor from that order's saved history. Missing vendors must be created or reactivated in Contacts first.</p>
                             <field name="partner_mapping_ids" nolabel="1" readonly="state == 'done'">
                                 <list editable="bottom" create="0" delete="0" decoration-warning="not target_partner_id and not create_contact">
                                     <field name="source_partner_id" string="Old company contact" readonly="1" options="{'no_create': True}"/>
                                     <field name="target_partner_id" string="Use this existing contact" options="{'no_create': True}" domain="[('company_id', 'in', [False, parent.target_company_id])]"/>
-                                    <field name="create_contact"/>
+                                    <field name="create_contact" column_invisible="not parent.include_financial"/>
                                 </list>
                             </field>
                         </page>

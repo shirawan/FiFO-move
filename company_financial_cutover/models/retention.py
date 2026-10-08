@@ -19,7 +19,11 @@ AUDIT_FIELDS = ("name", "state", "snapshot_hash", "move_id", "completed_at", "co
 LINE_FIELDS = ("sequence", "source_account_id", "target_account_id", "source_line_id", "source_date",
     "source_partner_id", "target_partner_id", "currency_id", "balance", "amount_currency", "date_maturity", "label", "kind", "posted_line_id")
 HISTORY_FIELDS = ("source_order_res_id", "name", "vendor_name", "original_state", "source_company_name",
-    "order_date", "currency_id", "amount_total", "snapshot", "target_order_id")
+    "order_date", "currency_id", "amount_total", "snapshot", "target_order_id", "replacement_vendor_id")
+OPENING_FIELDS = ("name", "ref", "date", "company_id", "currency_id", "journal_id", "move_type")
+OPENING_LINE_FIELDS = ("sequence", "name", "account_id", "partner_id", "date", "date_maturity",
+    "debit", "credit", "balance", "amount_currency", "currency_id", "company_id", "display_type",
+    "tax_line_id", "tax_repartition_line_id", "analytic_distribution")
 
 
 def archive_values(record, names):
@@ -59,7 +63,50 @@ class FinancialCutover(models.Model):
             "contacts": [archive_values(row, ("source_partner_id", "target_partner_id", "create_contact")) for row in self.partner_mapping_ids],
             "lines": [archive_values(row, LINE_FIELDS) for row in self.line_ids],
             "purchases": [archive_values(row, HISTORY_FIELDS) for row in self.purchase_history_ids],
+            "opening": self._opening_evidence(self.move_id) if self.move_id else False,
         }
+
+    def _opening_evidence(self, move):
+        evidence = {"id": move.id, **archive_values(move, OPENING_FIELDS),
+            "lines": [{"id": line.id, **archive_values(line, OPENING_LINE_FIELDS),
+                "tax_ids": sorted(line.tax_ids.ids), "tax_tag_ids": sorted(line.tax_tag_ids.ids)}
+                for line in move.line_ids.sorted("id")]}
+        # Normalize dates to the exact representation saved in JSON. Payment
+        # reconciliation fields are intentionally excluded from this evidence.
+        return json.loads(json.dumps(evidence, sort_keys=True, default=str))
+
+    def _validate_archived_opening(self, payload):
+        settings, audit = payload["settings"], payload["audit"]
+        move = self.env["account.move"].browse(audit["move_id"]).exists()
+        if not settings["include_financial"]:
+            if move:
+                raise UserError("A purchase-only archive unexpectedly references a financial opening. Ask your administrator to review recovery.")
+            return
+        changed = (not move or move.state != "posted" or move.move_type != "entry"
+            or move.company_id.id != settings["target_company_id"] or move.journal_id.id != settings["journal_id"]
+            or str(move.date) != settings["cutover_date"])
+        if not changed and payload.get("opening"):
+            changed = self._opening_evidence(move) != payload["opening"]
+        elif not changed:
+            # Older archives have no full native signature. Validate everything
+            # they did capture instead of accepting any posted entry by ID.
+            rows = sorted((row for row in payload["lines"] if row["kind"] != "stock_excluded"), key=lambda row: row["sequence"])
+            posted = {line.id: line for line in move.line_ids}
+            changed = set(posted) != {row["posted_line_id"] for row in rows}
+            for sequence, row in enumerate(rows, 1):
+                line = posted.get(row["posted_line_id"])
+                if not line:
+                    changed = True
+                    break
+                if (line.account_id.id != row["target_account_id"] or line.partner_id.id != row["target_partner_id"]
+                    or line.currency_id.id != row["currency_id"] or line.name != row["label"]
+                    or line.sequence != sequence or str(line.date_maturity or False) != str(row["date_maturity"])
+                    or not move.company_id.currency_id.is_zero(line.balance - row["balance"])
+                    or not line.currency_id.is_zero(line.amount_currency - row["amount_currency"])):
+                    changed = True
+                    break
+        if changed:
+            raise UserError("The archived financial opening has changed or is missing. Ask your accountant to review its date, journal and journal items before restoring migration history. Nothing was reposted.")
 
     def _save_durable_archive(self):
         self.ensure_one()
@@ -162,6 +209,7 @@ class FinancialCutover(models.Model):
             batch = Cutover.search([("archive_key", "=", payload["archive_key"])])
             if batch:
                 continue
+            Cutover._validate_archived_opening(payload)
             batch = Cutover.create({key: settings[key] for key in BASE_FIELDS})
             for name, model, rows in (
                 ("accounts", "company.financial.account.mapping", payload["accounts"]),
@@ -178,8 +226,6 @@ class FinancialCutover(models.Model):
             batch._system_write({**audit, "archive_key": payload["archive_key"],
                 "archive_attachment_id": manifest["attachment_id"], "report_attachment_id": manifest["report_id"]})
             if batch.move_id:
-                if batch.move_id.company_id != batch.target_company_id or batch.move_id.state != "posted":
-                    raise UserError("The archived financial opening has changed. Ask your accountant to review it before restoring its migration link.")
                 batch.move_id._restore_financial_cutover_link(batch.id)
             for history in histories.filtered("target_order_id"):
                 if history.target_order_id.company_id != batch.target_company_id:
@@ -200,6 +246,12 @@ class PurchaseHistory(models.Model):
     def action_prepare_draft(self):
         with self.env.cr.savepoint():
             result = super().action_prepare_draft()
+            self.cutover_id._save_durable_archive()
+            return result
+
+    def _choose_vendor(self, vendor):
+        with self.env.cr.savepoint():
+            result = super()._choose_vendor(vendor)
             self.cutover_id._save_durable_archive()
             return result
 

@@ -53,6 +53,9 @@ next stock step.
    are not silently created or source settings copied. The same shared contact record is reused. Different contact records are auto-matched only by a compatible tax ID or reference. Names help find possible matches but always require an explicit choice. Archived matches are included and need reactivation or review. A minimal destination contact is proposed only when no possible match exists. Proposed
    new contacts copy identity/address only, without old fiscal positions, bank
    accounts, payment terms or accounting properties.
+   Purchase-only moves also show existing vendor choices. History can be copied
+   without resolving every vendor; choose the correct destination vendor before
+   cancelling an original order for a replacement draft.
 5. If using the separate stock mover, review every source inventory valuation
    account and mark **Handled by Stock Cutover**. Known company/category stock
    valuation accounts are marked automatically when those fields are available.
@@ -94,14 +97,20 @@ without access to the old company's live orders. Source chatter, attachments,
 receipt documents and purchase analytics are not copied into native Purchase
 reports; original records remain in the old company.
 
-For an order with **no received or billed quantities**, cancel the original order
-in the old company first, then open its history and use **Prepare replacement draft**.
+For an order with **no received or billed quantities**, review its destination
+vendor in **Accounts and contacts**, or open saved history and use **Choose destination vendor**.
+An explicit choice can resolve a name-only match, including older histories
+without saved contact mappings. Select an existing active destination/shared
+vendor; no contact or purchase order is created by this choice. Then cancel the original order
+in the old company and use **Prepare replacement draft**.
 Cancellation is required before creating the draft, so uninstalling cannot leave
 both orders active. This action reuses eligible existing
-vendor/product records, uses the new company's tax configuration, and creates
+vendor/product records, applies the destination vendor's fiscal position to the
+new company's purchase taxes using Odoo's native line defaults, and creates
 one unconfirmed RFQ. After a draft is prepared, **View replacement order** opens that same order. Review its taxes,
 prices, units, expected arrival and company settings before confirming. While
-this addon is installed, confirmation also checks the original remains cancelled,
+this addon is installed, confirmation, approval and writes to the confirmed
+state check the original remains cancelled. Both orders are locked during approval to prevent concurrent confirmation,
 and the old order cannot be reconfirmed while a replacement exists. The migrated
 replacement cannot be duplicated through this addon.
 
@@ -160,6 +169,12 @@ their unpaid journal items and prepared native purchase orders remain after
 uninstalling. Custom audit/history tables are removed by Odoo, but reinstalling
 restores their completed rows and native record links from the saved archives.
 Recovery never reposts the opening or creates replacement orders again.
+Recovery checks the opening's accounting identity, date, journal, accounts,
+partners, currencies and amounts against its saved evidence. Editing and
+reposting the native opening while the addon is uninstalled stops recovery for
+accountant review. Normal payment reconciliation remains valid. Older archives
+without a full native signature are checked against their saved financial rows.
+Explicit destination vendor choices also survive uninstall/reinstall.
 
 Use **Download completed report** before uninstalling. Settings administrators
 can also find the private recovery JSON and report under Technical → Attachments;
@@ -185,7 +200,7 @@ remain readable files, with no automatic stock-wizard reconstruction.
   balance. Existing source/target configuration errors and ambiguous mappings
   need review before posting. The destination is a new ledger, not a merger into
   an already active ledger.
-- Concurrent commits with assigned transaction IDs anywhere in the database before lock acquisition trigger a full Odoo request retry with a fresh snapshot using `ConcurrencyError`. This is deliberately database-wide, including unrelated jobs. PostgreSQL automatic maintenance can also trigger this guard. Odoo retries at most five times; continued background writes can exhaust retries. Pause scheduled jobs and other writes across the database, rather than relying on automatic retry to create a maintenance window.
+- Committed inserts, updates or deletes in the locked accounting/configuration and selected purchase tables before lock acquisition trigger a full Odoo request retry with a fresh snapshot using `ConcurrencyError`. The guard compares actual tuple versions in this database, including deleted rows, and ignores the current request's own uncommitted changes. Commits in other PostgreSQL databases, transactions without changes to these tables, and ordinary automatic vacuum no longer trigger retries. These locks still cover the selected tables across companies in this database. Odoo retries at most five times; pause accounting and purchase writes during the move window.
 - Draft entries, unposted payments, archived contacts and contacts added after preview are checked before posting. A source completion marker also prevents repeating a move to a different replacement company or after reinstalling the addon. Possible duplicates among proposed new contacts need manual resolution.
 - Rebuild the preview after changing source entries, reconciliations, contacts,
   account choices, currency precision or destination configuration. Completed
@@ -217,6 +232,9 @@ dependencies and testing on a restored copy of your database.
 Run `bash tools/test_retention.sh` for a real isolated uninstall, code removal
 and reinstall, checking unchanged native data, archive bytes and markers,
 restored completed history, and prevention of duplicate recovery/copying.
+It also exercises concurrent native purchase approvals and a cloned disposable
+database where a native opening is changed while the addon is absent; reinstall
+must refuse that changed opening. No production data is used.
 
 The development test runner temporarily pauses automatic vacuum only in its
 verified local PostgreSQL cluster and restores the original setting on exit.
