@@ -84,3 +84,12 @@ Clearing accounts use an unused code starting at `STKCLR0001`. Unrelated account
 - Native currency rounding may change fractional opening unit costs and subsequent individual COGS amounts. Apply accepts currency-equivalent opening receipt totals only after quantity, product-value, FIFO-boundary and journal reconciliation pass. The rounding and before/after unit costs are recorded under Stock Reconciliation. Material discrepancies still roll back; no write-off account hides them.
 
 Preview limits per batch: **1,000 mapped inventory products, 10,000 stock rows, and 10,000 remaining FIFO receipt rows**. Check also limits Apply to **250 closing/opening movements**. Split larger cutovers by different products; do not split a product's FIFO pool arbitrarily.
+
+## Existing stock in the preview
+
+The whole-warehouse preview shows **Already in new company**, **Moving now**, and
+**New company total** for each product. Existing quantity is preserved and the
+moved quantity is added. These destination totals cover all warehouses in the
+new company; **Left elsewhere in old company** shows source stock outside the
+selected warehouse. Older saved previews missing a destination baseline ask for
+a fresh preview rather than assuming zero existing stock.

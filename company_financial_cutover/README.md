@@ -29,36 +29,33 @@ Tax control-account balances move without duplicating tax tags or taxable invoic
    List and search for **Company Financial Cutover** with the Apps filter removed.
 2. Configure the replacement company's chart, journals and fiscal year correctly.
    Both companies must use the same accounting currency and fiscal year start.
-   The destination must have **no posted accounting entries**. Take a verified
+   The destination must have **no draft or posted accounting entries, and no active payments**. Take a verified
    database backup and use a restored test copy before the actual cutover.
 3. Sign in as a Settings administrator with Accounting administrator access and
    enable both companies. Open **Accounting/Invoicing → Configuration → Move
-   Financial Opening**. Choose source, destination, cutover date, a destination
-   Miscellaneous journal and a destination retained-earnings equity account.
-4. Click **1. Match Accounts and Contacts**. Matching uses account codes and types
+   Financial Opening**. Choose the old company, new company and date. Existing journal and retained-earnings settings are selected automatically only when a single suitable choice exists. Otherwise, ask your accountant to complete **Accounting setup**.
+4. Click **1. Check existing data**. Matching uses account codes and types
    against the destination's existing chart. Select accounts manually where the
    codes differ. Missing or incompatible account choices block posting; accounts
    are not silently created or source settings copied. Shared contacts are reused;
-   company-owned contacts are matched by exact identity, or a minimal destination
-   contact is proposed. Ambiguous contacts require an explicit choice. Proposed
+   company-owned contacts are checked using tax IDs, references and names with normalized case/spacing. Archived matches are included and need reactivation or review. A minimal destination contact is proposed only when no possible match exists. Ambiguous contacts require an explicit choice. Proposed
    new contacts copy identity/address only, without old fiscal positions, bank
    accounts, payment terms or accounting properties.
 5. If using the separate stock mover, review every source inventory valuation
    account and mark **Handled by Stock Cutover**. Known company/category stock
    valuation accounts are marked automatically when those fields are available.
-   Select the destination stock clearing account; **Use Stock Mover's Clearing
-   Account** creates/reuses the supplied stock addon's saved clearing account when
+   Select the destination stock clearing account; **Connect the stock move** creates/reuses the supplied stock addon's saved clearing account when
    that addon is installed. Otherwise configure a Current Assets clearing account
    and explicitly use that same account in the stock mover. Inventory is excluded
    from this financial entry and carried through clearing instead.
-6. Click **2. Preview Opening**. This creates review/audit rows only, without
+6. Read **Check results** and resolve any needs-attention message. Run Check existing data again after editing choices. Click **2. Review amounts**. This creates review/audit rows only, without
    destination contacts or journals. Reconcile the trial balance, retained
    earnings, stock exclusions and each unpaid item with the accountant. Rebuild
    Preview after any configuration, mapping or accounting changes.
 7. Stop accounting activity in both companies during the agreed cutover window.
-   Click **3. Confirm Financial Opening**. Busy accounting tables, changed
+   Click **3. Move balances**. Busy accounting tables, changed
    previews, wrong posting dates or reconciliation differences refuse/roll back
-   the operation. Review **Open Posted Entry** and **Opening Reconciliation**.
+   the operation. Review **View completed move** and **Amounts to move**.
    Run the stock cutover afterwards on the same agreed date and with the same
    destination clearing account. Reconcile its inventory/clearing entries before
    starting normal operations in the replacement.
@@ -77,6 +74,7 @@ company ends with bank 50, inventory 100, equity -150 and clearing zero.
   balance. Existing source/target configuration errors and ambiguous mappings
   need review before posting. The destination is a new ledger, not a merger into
   an already active ledger.
+- Draft entries, unposted payments, archived contacts and contacts added after preview are checked before posting. A source completion marker also prevents repeating a move to a different replacement company or after reinstalling the addon. Possible duplicates among proposed new contacts need manual resolution.
 - Rebuild the preview after changing source entries, reconciliations, contacts,
   account choices, currency precision or destination configuration. Completed
   cutovers cannot repeat or be edited, deleted, or reset to draft. Post corrections

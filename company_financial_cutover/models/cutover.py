@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 from collections import defaultdict
 
 from psycopg2.errors import LockNotAvailable
@@ -20,10 +21,10 @@ class FinancialCutover(models.Model):
     _order = "id desc"
 
     name = fields.Char(default="New", readonly=True, copy=False)
-    source_company_id = fields.Many2one("res.company", required=True, ondelete="restrict")
-    target_company_id = fields.Many2one("res.company", required=True, ondelete="restrict")
+    source_company_id = fields.Many2one("res.company", string="Old company", required=True, ondelete="restrict")
+    target_company_id = fields.Many2one("res.company", string="New company", required=True, ondelete="restrict")
     currency_id = fields.Many2one(related="source_company_id.currency_id")
-    cutover_date = fields.Date(required=True, default=fields.Date.context_today)
+    cutover_date = fields.Date(string="Move balances as of", required=True, default=fields.Date.context_today)
     journal_id = fields.Many2one("account.journal", string="Destination Opening Journal")
     retained_earnings_account_id = fields.Many2one("account.account", string="Destination Retained Earnings")
     offset_account_id = fields.Many2one("account.account", string="Destination Stock Clearing Account",
@@ -31,13 +32,16 @@ class FinancialCutover(models.Model):
     mapping_ids = fields.One2many("company.financial.account.mapping", "cutover_id", copy=False)
     partner_mapping_ids = fields.One2many("company.financial.partner.mapping", "cutover_id", copy=False)
     line_ids = fields.One2many("company.financial.cutover.line", "cutover_id", readonly=True, copy=False)
-    state = fields.Selection([("draft", "Draft"), ("preview", "Reviewed Preview"), ("done", "Completed")],
+    state = fields.Selection([("draft", "Getting ready"), ("preview", "Preview ready"), ("done", "Completed")],
         default="draft", required=True, readonly=True, copy=False)
     snapshot_hash = fields.Char(readonly=True, copy=False)
     move_id = fields.Many2one("account.move", readonly=True, copy=False, ondelete="restrict")
     completed_at = fields.Datetime(readonly=True, copy=False)
     completed_by = fields.Many2one("res.users", readonly=True, copy=False)
     summary = fields.Text(readonly=True, copy=False)
+    check_status = fields.Selection([("unchecked", "Check needed"), ("blocked", "Needs attention"),
+        ("ready", "Ready to preview")], default="unchecked", readonly=True, copy=False)
+    check_report = fields.Text(string="Check results", readonly=True, copy=False)
 
     def _operator(self):
         if not (self.env.user.has_group("base.group_system")
@@ -49,13 +53,14 @@ class FinancialCutover(models.Model):
 
     @api.model_create_multi
     def create(self, vals_list):
-        protected = {"name", "state", "snapshot_hash", "move_id", "completed_at", "completed_by", "summary", "line_ids"}
+        protected = {"name", "state", "snapshot_hash", "move_id", "completed_at", "completed_by", "summary", "line_ids", "check_status", "check_report"}
         if any(protected.intersection(vals) for vals in vals_list):
             raise AccessError("Cutover audit fields are system-managed.")
         records = super().create(vals_list)
         records._operator()
         for record in records:
             record._system_write({"name": "FCUT/%06d" % record.id})
+            record._suggest_settings()
         return records
 
     def _system_write(self, values):
@@ -65,11 +70,12 @@ class FinancialCutover(models.Model):
         if self.filtered(lambda b: b.state == "done"):
             raise UserError("Completed financial cutovers are read-only.")
         self.line_ids._system_unlink()
-        self._system_write({"state": "draft", "snapshot_hash": False, "summary": False})
+        self._system_write({"state": "draft", "snapshot_hash": False, "summary": False,
+            "check_status": "unchecked", "check_report": False})
 
     def write(self, vals):
         self._operator()
-        protected = {"name", "state", "snapshot_hash", "move_id", "completed_at", "completed_by", "summary", "line_ids"}
+        protected = {"name", "state", "snapshot_hash", "move_id", "completed_at", "completed_by", "summary", "line_ids", "check_status", "check_report"}
         if protected.intersection(vals):
             raise AccessError("Cutover audit fields are system-managed.")
         self._invalidate_preview()
@@ -78,7 +84,34 @@ class FinancialCutover(models.Model):
             self.partner_mapping_ids.unlink()
         result = super().write(vals)
         self._operator()
+        if "target_company_id" in vals:
+            self._system_write({name: vals.get(name, False) for name in
+                ("journal_id", "retained_earnings_account_id", "offset_account_id")})
+            self._suggest_settings()
         return result
+
+    def _suggest_settings(self):
+        """Use existing settings only when there is exactly one suitable choice."""
+        for batch in self:
+            if not batch.target_company_id:
+                continue
+            values = {}
+            if not batch.journal_id:
+                matches = self.env["account.journal"].search([
+                    ("company_id", "=", batch.target_company_id.id), ("type", "=", "general")], limit=2)
+                if len(matches) == 1:
+                    values["journal_id"] = matches.id
+            if not batch.retained_earnings_account_id:
+                Account = self.env["account.account"].with_company(batch.target_company_id)
+                matches = Account.search([*Account._check_company_domain(batch.target_company_id),
+                    ("account_type", "=", "equity_unaffected")], limit=2)
+                if len(matches) == 1:
+                    values["retained_earnings_account_id"] = matches.id
+            if values:
+                batch._system_write(values)
+
+    def _completion_key(self):
+        return "company_financial_cutover.completed.source.%s" % self.source_company_id.id
 
     def unlink(self):
         self._operator()
@@ -97,10 +130,19 @@ class FinancialCutover(models.Model):
             raise UserError("Choose different companies with the same accounting currency.")
         if self.cutover_date > fields.Date.context_today(self):
             raise UserError("The cutover date cannot be in the future.")
-        if self.search_count([("source_company_id", "=", source.id), ("state", "=", "done")]):
+        # Check across all previous destinations, including companies hidden by
+        # the current switcher. Reveal only that this accessible source moved.
+        if (self.sudo().search_count([("source_company_id", "=", source.id), ("state", "=", "done")])
+            or self.env["ir.config_parameter"].sudo().search_count([("key", "=", self._completion_key())])):
             raise UserError("This source company already has a completed financial cutover.")
-        if self.env["account.move"].search_count([("company_id", "=", target.id), ("state", "=", "posted")]):
-            raise UserError("The destination already has posted accounting entries. Use a fresh destination and run the financial cutover before the stock cutover.")
+        posted = self.env["account.move"].search_count([("company_id", "=", target.id), ("state", "=", "posted")])
+        drafts = self.env["account.move"].search_count([("company_id", "=", target.id), ("state", "=", "draft")])
+        payments = self.env["account.payment"].search_count([("company_id", "=", target.id),
+            ("state", "not in", ["canceled", "rejected"])])
+        if posted or drafts or payments:
+            raise UserError("The destination already has posted entries: %s; draft entries: %s; payments: %s. "
+                "Review these existing transactions with your accountant. Use a fresh destination to avoid duplicate balances."
+                % (posted, drafts, payments))
         dates = source.compute_fiscalyear_dates(self.cutover_date)
         if dates["date_from"] != target.compute_fiscalyear_dates(self.cutover_date)["date_from"]:
             raise UserError("Align the companies' fiscal year boundaries before cutover.")
@@ -140,6 +182,7 @@ class FinancialCutover(models.Model):
         self._invalidate_preview()
         if self.source_company_id == self.target_company_id:
             raise UserError("Choose different source and destination companies.")
+        self._suggest_settings()
         lines = self._source_lines()
         Account = self.env["account.account"].with_company(self.target_company_id)
         account_domain = Account._check_company_domain(self.target_company_id)
@@ -161,24 +204,67 @@ class FinancialCutover(models.Model):
             })
         partners = lines.filtered(lambda l: l.account_id.account_type in OPEN_ITEM_TYPES).partner_id
         existing = set(self.partner_mapping_ids.source_partner_id.ids)
-        Partner = self.env["res.partner"].with_company(self.target_company_id)
+        pool = self._contact_pool()
         for partner in partners.sorted("id"):
             if partner.id in existing:
                 continue
-            if not partner.company_id or partner.company_id == self.target_company_id:
-                matches = partner if partner.active else Partner.browse()
-            else:
-                matches = Partner.search([
-                    ("company_id", "in", [False, self.target_company_id.id]),
-                    ("name", "=", partner.name), ("vat", "=", partner.vat or False),
-                    ("is_company", "=", partner.is_company),
-                ])
+            matches = self._contact_candidates(partner, pool)
+            automatic = len(matches) == 1 and self._contact_compatible(partner, matches)
             self.env["company.financial.partner.mapping"].create({
                 "cutover_id": self.id, "source_partner_id": partner.id,
-                "target_partner_id": matches.id if len(matches) == 1 else False,
+                "target_partner_id": matches.id if automatic else False,
                 "create_contact": not matches,
             })
+        reused = len(self.partner_mapping_ids.filtered("target_partner_id"))
+        new = len(self.partner_mapping_ids.filtered(lambda m: not m.target_partner_id and m.create_contact))
+        report = ["Existing accounts and contacts are reused wherever a clear match is found.",
+            "Contacts: %s existing; %s proposed new; %s need a choice." % (
+                reused, new, len(self.partner_mapping_ids) - reused - new)]
+        try:
+            self._plan()
+        except UserError as exc:
+            status = "blocked"
+            report.append("Needs attention: %s" % exc)
+        else:
+            status = "ready"
+            report.append("Checks passed. Next: open the preview and review the amounts before moving.")
+        self._system_write({"check_status": status, "check_report": "\n\n".join(report)})
         return True
+
+    @staticmethod
+    def _identity(value, identifier=False):
+        value = (value or "").casefold()
+        return re.sub(r"[^\w]", "", value) if identifier else " ".join(value.split())
+
+    def _contact_pool(self):
+        Partner = self.env["res.partner"].with_company(self.target_company_id).with_context(active_test=False)
+        contacts = Partner.search([("company_id", "in", [False, self.target_company_id.id])], limit=MAX_SOURCE_LINES + 1)
+        if len(contacts) > MAX_SOURCE_LINES:
+            raise UserError("More than 100,000 destination contacts need a separately reviewed matching process.")
+        pool = {key: defaultdict(lambda: Partner.browse()) for key in ("vat", "ref", "name")}
+        for partner in contacts:
+            for field in pool:
+                key = self._identity(partner[field], field != "name")
+                if key:
+                    pool[field][(partner.is_company, key)] |= partner
+        return pool
+
+    def _contact_candidates(self, source, pool):
+        if not source.company_id or source.company_id == self.target_company_id:
+            return source
+        for field in ("vat", "ref", "name"):
+            key = self._identity(source[field], field != "name")
+            matches = pool[field].get((source.is_company, key), self.env["res.partner"])
+            # A VAT shared by several people is not a unique person's identity.
+            if field == "vat" and not source.is_company:
+                matches = matches.filtered(lambda p: self._identity(p.name) == self._identity(source.name))
+            if matches:
+                return matches
+        return self.env["res.partner"]
+
+    def _contact_compatible(self, source, target):
+        return all(not source[field] or self._identity(source[field], True) == self._identity(target[field], True)
+            for field in ("vat", "ref"))
 
     def _check_account(self, account, currency):
         if not account.active or not account.filtered_domain(account._check_company_domain(self.target_company_id)):
@@ -223,6 +309,8 @@ class FinancialCutover(models.Model):
         previous_profit = 0.0
         rows = []
         source_evidence = []
+        contact_pool = self._contact_pool()
+        proposed = {}
         for line in lines:
             account = line.account_id
             currency = line.currency_id
@@ -247,7 +335,19 @@ class FinancialCutover(models.Model):
                 if not mapping or (not mapping.target_partner_id and not mapping.create_contact):
                     raise UserError("Review the missing or ambiguous destination contact for %s." % line.partner_id.display_name)
                 if mapping.target_partner_id and (not mapping.target_partner_id.active or mapping.target_partner_id.company_id not in (self.env["res.company"], self.target_company_id)):
-                    raise UserError("Destination contacts must be active and shared or belong to the destination company.")
+                    raise UserError("The existing destination contact for %s is archived or belongs to another company. Review or reactivate it instead of creating a duplicate." % line.partner_id.display_name)
+                if not mapping.target_partner_id:
+                    if self._contact_candidates(line.partner_id, contact_pool):
+                        raise UserError("An existing or archived contact may match %s. Select and review the existing contact before moving; a duplicate will not be created." % line.partner_id.display_name)
+                    for field in ("vat", "ref", "name"):
+                        identity = self._identity(line.partner_id[field], field != "name")
+                        if not identity:
+                            continue
+                        key = (field, line.partner_id.is_company, identity)
+                        other = proposed.get(key)
+                        if other and other != line.partner_id.id:
+                            raise UserError("Two source contacts may represent %s. Choose an existing destination contact for both, or ask your accountant to resolve their identities first." % line.partner_id.display_name)
+                        proposed[key] = line.partner_id.id
                 rows.append({
                     "source_account_id": account.id, "source_line_id": line.id,
                     "source_partner_id": line.partner_id.id,
@@ -352,8 +452,9 @@ class FinancialCutover(models.Model):
         try:
             with self.env.cr.savepoint():
                 self.env.cr.execute("""
-                    LOCK TABLE account_move, account_move_line, account_partial_reconcile,
+                    LOCK TABLE account_move, account_move_line, account_partial_reconcile, account_payment,
                     account_account, account_journal, res_partner, res_company, res_currency,
+                    ir_config_parameter,
                     company_financial_cutover, company_financial_account_mapping,
                     company_financial_partner_mapping, company_financial_cutover_line
                     IN SHARE ROW EXCLUSIVE MODE NOWAIT
@@ -384,16 +485,23 @@ class FinancialCutover(models.Model):
     def _create_contacts(self, source_partner_ids):
         contacts = {}
         Partner = self.env["res.partner"].with_company(self.target_company_id)
+        pool = self._contact_pool()
         for mapping in self.partner_mapping_ids.filtered(lambda m: m.source_partner_id.id in source_partner_ids):
             if mapping.target_partner_id:
                 contacts[mapping.source_partner_id.id] = mapping.target_partner_id.id
                 continue
             source = mapping.source_partner_id
+            if self._contact_candidates(source, pool):
+                raise UserError("An existing contact now matches %s. Check contacts again before moving." % source.display_name)
             values = {name: source[name] for name in ("name", "company_type", "vat", "street", "street2", "city", "zip", "email", "phone", "website", "lang")}
             values.update({"company_id": self.target_company_id.id,
                 "country_id": source.country_id.id, "state_id": source.state_id.id,
                 "ref": source.ref, "comment": "Opening contact from %s (%s)." % (self.source_company_id.name, source.id)})
             contact = Partner.create(values)
+            for field in pool:
+                key = self._identity(contact[field], field != "name")
+                if key:
+                    pool[field][(contact.is_company, key)] |= contact
             mapping._system_write({"target_partner_id": contact.id})
             contacts[source.id] = contact.id
         return contacts
@@ -448,6 +556,9 @@ class FinancialCutover(models.Model):
                 review._system_write({"posted_line_id": line.id, "target_partner_id": line.partner_id.id})
             self._system_write({"state": "done", "move_id": move.id,
                 "completed_at": fields.Datetime.now(), "completed_by": self.env.user.id})
+            # No external ID: retain the completion marker across addon reinstall.
+            self.env["ir.config_parameter"].sudo().set_param(self._completion_key(), json.dumps({
+                "move_id": move.id, "cutover_id": self.id, "date": str(self.cutover_date)}))
         return self.action_open_entry()
 
     def action_open_entry(self):

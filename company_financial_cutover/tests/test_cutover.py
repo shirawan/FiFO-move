@@ -399,3 +399,124 @@ class TestFinancialCutover(TransactionCase):
             form.journal_id = self.journals[self.target.id]["general"]
             form.retained_earnings_account_id = self.accounts[self.target.id]["retained"]
         self.assertEqual(form.record.state, "draft")
+
+    def _owned_customer(self, name="Contact to move", **values):
+        contact = self.env["res.partner"].create({"name": name, "company_id": self.source.id, **values})
+        self._entry(self.source, [("receivable", 100, contact), ("revenue", -100)])
+        return contact
+
+    def test_archived_matching_contact_is_not_duplicated(self):
+        source = self._owned_customer()
+        archived = self.env["res.partner"].create({
+            "name": source.name, "company_id": self.target.id, "active": False})
+        batch = self._batch()
+        batch.action_match()
+        self.assertEqual(batch.check_status, "blocked")
+        self.assertEqual(batch.partner_mapping_ids.target_partner_id, archived)
+        self.assertFalse(batch.partner_mapping_ids.create_contact)
+        with self.assertRaisesRegex(UserError, "archived"):
+            batch.action_preview()
+        archived.active = True
+        self._run(batch)
+        self.assertEqual(batch.partner_mapping_ids.target_partner_id, archived)
+
+    def test_contact_added_after_preview_stops_new_contact_creation(self):
+        source = self._owned_customer()
+        batch = self._batch()
+        batch.action_match()
+        batch.action_preview()
+        existing = self.env["res.partner"].create({
+            "name": source.name.upper(), "company_id": self.target.id})
+        with self.assertRaisesRegex(UserError, "existing or archived"):
+            batch.action_apply()
+        self.assertFalse(batch.move_id)
+        self.assertFalse(batch.partner_mapping_ids.target_partner_id)
+        batch.partner_mapping_ids.target_partner_id = existing
+        self._run(batch)
+        self.assertEqual(batch.partner_mapping_ids.target_partner_id, existing)
+
+    def test_normalized_names_reuse_existing_contact(self):
+        self._owned_customer("  Acme   Trading  ")
+        existing = self.env["res.partner"].create({"name": "ACME Trading", "company_id": self.target.id})
+        batch = self._run()
+        self.assertEqual(batch.partner_mapping_ids.target_partner_id, existing)
+
+    def test_conflicting_identity_requires_manual_contact_choice(self):
+        self._owned_customer(ref="OLD-001")
+        self.env["res.partner"].create({"name": "Contact to move", "ref": "OTHER-002", "company_id": self.target.id})
+        batch = self._batch()
+        batch.action_match()
+        self.assertEqual(batch.check_status, "blocked")
+        self.assertFalse(batch.partner_mapping_ids.target_partner_id)
+        self.assertFalse(batch.partner_mapping_ids.create_contact)
+        with self.assertRaisesRegex(UserError, "missing or ambiguous"):
+            batch.action_preview()
+
+    def test_two_new_source_contacts_with_same_identity_are_blocked(self):
+        self._owned_customer("Possible Duplicate")
+        self._owned_customer("possible duplicate")
+        batch = self._batch()
+        batch.action_match()
+        with self.assertRaisesRegex(UserError, "Two source contacts"):
+            batch.action_preview()
+        self.assertFalse(self.env["res.partner"].search([
+            ("company_id", "=", self.target.id), ("name", "ilike", "Possible Duplicate")]))
+
+    def test_destination_draft_added_after_preview_blocks_move(self):
+        self._invoice()
+        batch = self._batch()
+        batch.action_match()
+        batch.action_preview()
+        self.env["account.move"].with_company(self.target).create({
+            "company_id": self.target.id, "journal_id": self.journals[self.target.id]["general"].id,
+            "date": self.cutoff})
+        with self.assertRaisesRegex(UserError, "draft entries: 1"):
+            batch.action_apply()
+        self.assertFalse(batch.move_id)
+
+    def test_payment_without_journal_entry_blocks_move(self):
+        self._invoice()
+        bank = self.env["account.journal"].with_company(self.target).create({
+            "name": "New company bank", "code": "BNK", "type": "bank", "company_id": self.target.id,
+            "default_account_id": self.accounts[self.target.id]["bank"].id})
+        bank.inbound_payment_method_line_ids.payment_account_id = self.accounts[self.target.id]["clearing"]
+        payment = self.env["account.payment"].with_company(self.target).create({
+            "company_id": self.target.id, "payment_type": "inbound", "partner_type": "customer",
+            "partner_id": self.customer.id, "amount": 10, "date": self.cutoff, "journal_id": bank.id,
+            "payment_method_line_id": bank.inbound_payment_method_line_ids[:1].id})
+        self.assertFalse(payment.move_id)
+        batch = self._batch()
+        batch.action_match()
+        with self.assertRaisesRegex(UserError, "payments: 1"):
+            batch.action_preview()
+
+    def test_completed_source_is_blocked_outside_current_company_selection(self):
+        self._invoice()
+        self._run()
+        third = self.env["res.company"].create({"name": "Another replacement", "currency_id": self.source.currency_id.id})
+        env = self.env(context={**self.env.context, "allowed_company_ids": [self.source.id, third.id]})
+        batch = env["company.financial.cutover"].create({
+            "source_company_id": self.source.id, "target_company_id": third.id, "cutover_date": self.cutoff})
+        with self.assertRaisesRegex(UserError, "already has a completed"):
+            batch._validate()
+
+    def test_persistent_completion_marker_blocks_new_cutover(self):
+        self._invoice()
+        batch = self._batch()
+        self.env["ir.config_parameter"].sudo().set_param(batch._completion_key(), "previous opening")
+        with self.assertRaisesRegex(UserError, "already has a completed"):
+            batch.action_preview()
+
+    def test_existing_settings_are_suggested_without_creating_accounts(self):
+        self._invoice()
+        before = self.env["account.account"].search_count([])
+        batch = self.env["company.financial.cutover"].create({
+            "source_company_id": self.source.id, "target_company_id": self.target.id, "cutover_date": self.cutoff})
+        self.assertEqual(batch.journal_id, self.journals[self.target.id]["general"])
+        self.assertEqual(batch.retained_earnings_account_id, self.accounts[self.target.id]["retained"])
+        batch.action_match()
+        self.assertEqual(batch.check_status, "ready")
+        self.assertIn("existing", batch.check_report)
+        self.assertEqual(self.env["account.account"].search_count([]), before)
+        batch.partner_mapping_ids.create_contact = True
+        self.assertEqual(batch.check_status, "unchecked")

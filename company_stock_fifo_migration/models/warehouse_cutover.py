@@ -8,6 +8,7 @@ from odoo.exceptions import AccessError, UserError
 from .execution import opening_chunks, execute_cutover, lock_cutover_tables
 from .migration import _SYSTEM_CONTEXT, _SYSTEM_TOKEN, fingerprint
 from .destination import product_matches, location_matches
+from .presentation import product_preview_table
 from .snapshot import (company_model, LOCATION_ROLES, LOT_FIELDS, source_operations_plan,
                        source_product_plans, build_snapshot, reviewed_allocations, target_stock_state)
 
@@ -60,18 +61,7 @@ class WholeWarehouseCutover(models.Model):
             preview_html = (
                 '<p>%s company-specific product variants will be created, including unstocked sibling variants.</p>'
                 % (cutover.preview_data or {}).get("copied_variant_count", len(rows))
-                + '<table class="table table-sm"><thead><tr><th>Product</th><th>Destination action</th>'
-                '<th>Quantity to move</th><th>Left elsewhere</th><th>Unit</th><th>Opening value</th><th>Source</th></tr></thead><tbody>'
-                + "".join(
-                    "<tr><td>%s</td><td>%s</td><td>%g</td><td>%g</td><td>%s</td><td>%.2f</td><td>%s</td></tr>" % (
-                        escape(row["name"]), ("Reuse %s (#%s)" % (escape(row.get("target_name", "")), row["target"])
-                                              if row.get("target") else "Create product"),
-                        row["quantity"], row["company_quantity"] - row["quantity"],
-                        escape(row["unit"]), row["value"],
-                        ("Archived original; active new copy" if row.get("archived") else
-                         "Shared product" if row["shared"] else "Source-company product"),
-                    ) for row in rows
-                ) + "</tbody></table>"
+                + product_preview_table(cutover.preview_data)
             ) if rows else False
             if rows and cutover.preview_data.get("location_matches"):
                 locations = cutover.preview_data["location_matches"]

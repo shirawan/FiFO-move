@@ -21,9 +21,9 @@
         <field name="arch" type="xml">
             <form string="Move Whole Warehouse" duplicate="0">
                 <header>
-                    <button name="action_preview" type="object" string="1. Preview Warehouse"
+                    <button name="action_preview" type="object" string="1. Check stock and review"
                             class="btn-primary" invisible="state == 'done'"/>
-                    <button name="action_apply" type="object" string="2. Confirm — Move All Stock"
+                    <button name="action_apply" type="object" string="2. Move reviewed stock"
                             class="btn-primary" invisible="state != 'review'"
                             confirm="Move ALL reviewed recorded stock into the selected destination warehouse? Existing matched products are reused; missing products and child locations are created. No new warehouse is created. If you chose to leave old operations behind, reviewed reservations are released, including Picked lines. Old operations remain open and must NOT be processed after cutover. Draft counts, historical documents and recipes are not copied. Perpetual products create posted valuation entries; periodic products need separate general-ledger inventory adjustments. Stop inventory operations and verify your backup before confirming. Uninstalling is not an Undo."/>
                     <button name="action_open_reconciliation" type="object" string="Open Stock Reconciliation"
@@ -112,6 +112,8 @@
                         Review each product's Create or Reuse result and quantity below.
                         Matched products receive additional stock, not duplicate product records.
                         Ambiguous matches must be resolved before confirming.
+                        Check Already in new company, Moving now and New company total before confirming.
+                        <details><summary>Accounting and product setup details</summary>
                         Normal currency rounding is accepted when quantities and total values reconcile.
                         Fractional unit costs and later individual COGS entries may differ slightly;
                         rounding is recorded in Stock Reconciliation.
@@ -126,6 +128,7 @@
                         those other quantities stay where they are.
                         Stock left in other warehouses can be moved in a later batch.
                         Review the Left elsewhere column before confirming.
+                        </details>
                     </div>
                     <field name="preview_html" nolabel="1" invisible="state == 'draft'"/>
                     <p class="text-muted">
