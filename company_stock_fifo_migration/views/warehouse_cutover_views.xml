@@ -1,0 +1,173 @@
+<odoo>
+    <record id="whole_warehouse_cutover_list" model="ir.ui.view">
+        <field name="name">company.stock.warehouse.cutover.list</field>
+        <field name="model">company.stock.warehouse.cutover</field>
+        <field name="arch" type="xml">
+            <list decoration-success="state == 'done'">
+                <field name="source_warehouse_id" string="Warehouse to Move"/>
+                <field name="source_company_id" string="From Company"/>
+                <field name="target_company_id" string="To Company"/>
+                <field name="target_warehouse_id" string="Destination Warehouse"/>
+                <field name="product_count" string="Products"/>
+                <field name="currency_id" column_invisible="True"/>
+                <field name="total_value" string="Opening Stock Value"/>
+                <field name="state" widget="badge"/>
+            </list>
+        </field>
+    </record>
+    <record id="whole_warehouse_cutover_form" model="ir.ui.view">
+        <field name="name">company.stock.warehouse.cutover.form</field>
+        <field name="model">company.stock.warehouse.cutover</field>
+        <field name="arch" type="xml">
+            <form string="Move Whole Warehouse" duplicate="0">
+                <header>
+                    <button name="action_preview" type="object" string="1. Preview Warehouse"
+                            class="btn-primary" invisible="state == 'done'"/>
+                    <button name="action_apply" type="object" string="2. Confirm — Move All Stock"
+                            class="btn-primary" invisible="state != 'review'"
+                            confirm="Move ALL reviewed recorded stock into the selected destination warehouse? Existing matched products are reused; missing products and child locations are created. No new warehouse is created. If you chose to leave old operations behind, reviewed reservations are released, including Picked lines. Old operations remain open and must NOT be processed after cutover. Draft counts, historical documents and recipes are not copied. Perpetual products create posted valuation entries; periodic products need separate general-ledger inventory adjustments. Stop inventory operations and verify your backup before confirming. Uninstalling is not an Undo."/>
+                    <button name="action_open_reconciliation" type="object" string="Open Stock Reconciliation"
+                            invisible="state != 'done'"/>
+                    <field name="state" widget="statusbar" statusbar_visible="draft,review,done"/>
+                </header>
+                <sheet>
+                    <div class="alert alert-info" role="alert" invisible="state == 'done'">
+                        Choose the source and destination warehouses. Existing products and matching
+                        child locations are reused; missing ones are created on Confirm.
+                        Preview includes All Companies products and does not change stock.
+                    </div>
+                    <div class="alert alert-success" role="alert" invisible="state != 'done'">
+                        Completed. Stock was added to the selected destination warehouse.
+                        Open Stock Reconciliation to check quantities, values, lots and posted entries.
+                        Originals and historical documents remain in the Source Company.
+                    </div>
+                    <group>
+                        <group string="Move From">
+                            <field name="source_warehouse_id" string="Warehouse to Move"
+                                   domain="[('active', '=', True), ('company_id', 'in', context.get('allowed_company_ids', []))]"
+                                   options="{'no_create': True}" readonly="state == 'done'"/>
+                            <field name="source_company_id" string="Source Company"/>
+                        </group>
+                        <group string="Move To">
+                            <field name="target_company_id" string="Target Company"
+                                   domain="[('id', '!=', source_company_id), ('id', 'in', context.get('allowed_company_ids', []))]"
+                                   options="{'no_create': True}" readonly="state == 'done'"/>
+                            <field name="target_warehouse_id" string="Destination Warehouse"
+                                   domain="[('company_id', '=', target_company_id), ('active', '=', True)]"
+                                   options="{'no_create': True}" required="state != 'done'"
+                                   readonly="state == 'done'"/>
+                        </group>
+                    </group>
+                    <group>
+                        <field name="release_source_reservations" readonly="state == 'done'"/>
+                    </group>
+                    <group string="Destination Product Choices (only when needed)">
+                        <p>If Preview finds several matches, add the source product and choose the existing destination product here.
+                           Leave all other products automatic. Neither matching product needs deleting.</p>
+                        <field name="product_choice_ids" nolabel="1" readonly="state == 'done'">
+                            <list editable="bottom">
+                                <field name="source_product_id" string="Source Product" options="{'no_create': True}"/>
+                                <field name="target_product_id" string="Use This Destination Product"
+                                       domain="[('company_id', '=', parent.target_company_id), ('active', '=', True), ('is_storable', '=', True)]"
+                                       options="{'no_create': True}"/>
+                                <field name="target_record_id" readonly="1"/>
+                                <field name="target_reference" readonly="1"/>
+                            </list>
+                        </field>
+                    </group>
+                    <group string="Destination Location Choices (optional)">
+                        <field name="source_root_location_id" invisible="1"/>
+                        <field name="target_root_location_id" invisible="1"/>
+                        <p>Choose where a source location's stock should go inside the destination warehouse.
+                           Leave other locations automatic. Several source locations can use the same destination.
+                           Unmapped child locations follow their mapped parent; missing children are created.</p>
+                        <field name="location_choice_ids" nolabel="1" readonly="state == 'done'">
+                            <list editable="bottom">
+                                <field name="source_location_id" string="From Location"
+                                       context="{'active_test': False}"
+                                       domain="[('id', 'child_of', parent.source_root_location_id), ('usage', 'in', ['internal', 'transit'])]"
+                                       options="{'no_create': True}"/>
+                                <field name="target_location_id" string="Move Stock To"
+                                       domain="[('id', 'child_of', parent.target_root_location_id), ('company_id', '=', parent.target_company_id), ('usage', 'in', ['internal', 'transit']), ('active', '=', True)]"
+                                       options="{'no_create': True}"/>
+                            </list>
+                        </field>
+                    </group>
+                    <div class="alert alert-danger" role="alert" invisible="not release_source_reservations">
+                        Confirm will RELEASE the reviewed reservations inside the Source warehouse.
+                        This includes Picked lines. Recorded on-hand quantities are moved;
+                        draft stock counts are not applied or copied.
+                        Old deliveries, orders and manufacturing operations remain OPEN in the old company;
+                        they are not transferred or cancelled. Do not process them after cutover.
+                        Do not apply old draft counts after cutover.
+                        Preview does not release anything. Other warehouse reservations remain unchanged.
+                    </div>
+                    <group invisible="state == 'draft'">
+                        <field name="product_count" string="Stocked Products"/>
+                        <field name="currency_id" invisible="1"/>
+                        <field name="total_value" string="Opening Stock Value"/>
+                        <field name="cutover_at" string="Preview / Cutover Time"/>
+                    </group>
+                    <div invisible="state != 'review'" class="alert alert-warning" role="alert">
+                        Review each product's Create or Reuse result and quantity below.
+                        Matched products receive additional stock, not duplicate product records.
+                        Ambiguous matches must be resolved before confirming.
+                        Normal currency rounding is accepted when quantities and total values reconcile.
+                        Fractional unit costs and later individual COGS entries may differ slightly;
+                        rounding is recorded in Stock Reconciliation.
+                        Shared-product barcodes remain on the originals and are blank on the new copies.
+                        New inventory categories preserve the source costing and valuation methods and use the Target Company's stock accounts.
+                        Existing FIFO products can receive Standard Cost source stock at its carried value; destination costing is not changed.
+                        Periodic valuation moves stock value but does not post automatic journal entries;
+                        handle the general-ledger inventory adjustment separately.
+                        Product families also create their unstocked sibling variants; the total is shown below.
+                        Recipes/BoMs, suppliers, packaging, POS links, custom routes and reordering rules need separate setup.
+                        If the same item has stock in other Source warehouses, its cost uses the company-wide FIFO pool;
+                        those other quantities stay where they are.
+                        Stock left in other warehouses can be moved in a later batch.
+                        Review the Left elsewhere column before confirming.
+                    </div>
+                    <field name="preview_html" nolabel="1" invisible="state == 'draft'"/>
+                    <p class="text-muted">
+                        Both companies must be enabled in the company switcher.
+                        FIFO, Average Cost and Standard Price are supported without changing the originals.
+                        Perpetual products need valid stock-account configuration.
+                        Negative stock, consignment and packages need separate handling.
+                        Choose "Move recorded stock; leave old operations behind" to leave draft counts
+                        and unfinished operations in the old company, including Picked operations.
+                        Products with variant exclusions require separate review.
+                        This is an opening-stock cutover, not a transfer of historical transactions.
+                    </p>
+                    <button name="action_open_previous_cutovers" type="object" string="Review Earlier Stock Cutovers"
+                            class="btn-link"/>
+                </sheet>
+            </form>
+        </field>
+    </record>
+    <record id="whole_warehouse_cutover_search" model="ir.ui.view">
+        <field name="name">company.stock.warehouse.cutover.search</field>
+        <field name="model">company.stock.warehouse.cutover</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="source_warehouse_id"/>
+                <field name="target_company_id"/>
+                <field name="target_warehouse_id"/>
+                <filter name="in_progress" string="In Progress" domain="[('state', '!=', 'done')]"/>
+                <filter name="completed" string="Completed" domain="[('state', '=', 'done')]"/>
+            </search>
+        </field>
+    </record>
+    <record id="whole_warehouse_cutover_action" model="ir.actions.act_window">
+        <field name="name">Move Whole Warehouse</field>
+        <field name="res_model">company.stock.warehouse.cutover</field>
+        <field name="view_mode">list,form</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">Move a warehouse into its replacement company</p>
+            <p>Choose source and destination warehouses. Preview all stock, reuse matching products and create only missing products and child locations.</p>
+        </field>
+    </record>
+    <record id="stock_fifo_migration_menu" model="ir.ui.menu">
+        <field name="name">Move Opening Stock</field>
+        <field name="action" ref="whole_warehouse_cutover_action"/>
+    </record>
+</odoo>

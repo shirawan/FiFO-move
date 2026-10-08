@@ -1,0 +1,9 @@
+<odoo>
+    <record id="stock_fifo_cutover_sequence" model="ir.sequence">
+        <field name="name">Stock FIFO Cutover</field>
+        <field name="code">company.stock.fifo.migration</field>
+        <field name="prefix">STOCK-CUTOVER/</field>
+        <field name="padding">5</field>
+        <field name="company_id" eval="False"/>
+    </record>
+</odoo>

@@ -1,0 +1,10 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_stock_fifo_cutover,stock.fifo.cutover,model_company_stock_fifo_migration,base.group_system,1,1,1,1
+access_stock_fifo_product,stock.fifo.product,model_company_stock_fifo_product,base.group_system,1,1,1,1
+access_stock_fifo_warehouse,stock.fifo.warehouse,model_company_stock_fifo_warehouse,base.group_system,1,1,1,1
+access_stock_fifo_location,stock.fifo.location,model_company_stock_fifo_location,base.group_system,1,1,1,1
+access_stock_fifo_lot,stock.fifo.lot,model_company_stock_fifo_lot,base.group_system,1,1,1,1
+access_stock_fifo_tranche,stock.fifo.tranche,model_company_stock_fifo_tranche,base.group_system,1,1,1,1
+access_whole_warehouse_cutover,stock.whole.warehouse.cutover,model_company_stock_warehouse_cutover,base.group_system,1,1,1,1
+access_warehouse_product_choice,stock.warehouse.product.choice,model_company_stock_warehouse_product_choice,base.group_system,1,1,1,1
+access_warehouse_location_choice,stock.warehouse.location.choice,model_company_stock_warehouse_location_choice,base.group_system,1,1,1,1

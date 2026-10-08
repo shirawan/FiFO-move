@@ -1,0 +1,283 @@
+<odoo>
+    <record id="stock_fifo_migration_list_view" model="ir.ui.view">
+        <field name="name">company.stock.fifo.migration.list</field>
+        <field name="model">company.stock.fifo.migration</field>
+        <field name="arch" type="xml">
+            <list decoration-success="state == 'done'">
+                <field name="name"/>
+                <field name="source_company_id" string="From Company"/>
+                <field name="target_company_id" string="To Company"/>
+                <field name="cutover_at"/>
+                <field name="state" widget="badge"/>
+                <field name="completed_at" optional="hide"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="stock_fifo_migration_form_view" model="ir.ui.view">
+        <field name="name">company.stock.fifo.migration.form</field>
+        <field name="model">company.stock.fifo.migration</field>
+        <field name="arch" type="xml">
+            <form string="Move Opening Stock">
+                <header>
+                    <button name="action_import_mappings" type="object" string="1. Import Product Matches"
+                            class="btn-primary" invisible="state != 'draft'"/>
+                    <button name="action_prepare_locations" type="object" string="2. Prepare Locations"
+                            invisible="state not in ['mapped', 'review', 'ready']"
+                            confirm="Refresh locations and lots from the selected warehouses? This clears the location and lot matches already entered in this batch. No stock is moved."/>
+                    <button name="action_preview" type="object" string="3. Build Preview"
+                            invisible="state not in ['mapped', 'review', 'ready']"
+                            confirm="Build a fresh stock preview? This replaces the FIFO quantities reviewed in this batch. No stock is moved."/>
+                    <button name="action_check" type="object" string="4. Check"
+                            class="btn-primary" invisible="state not in ['review', 'ready']"/>
+                    <button name="action_apply" type="object" string="5. Move Selected Stock"
+                            class="btn-primary" invisible="state != 'ready'"
+                            confirm="Move the reviewed stock out of the Source Company and create opening stock in the Target Company? This creates stock movements and accounting entries in both companies. Historical transactions stay in the Source Company. Only proceed during the agreed cutover with operations stopped and a verified backup."/>
+                    <field name="state" widget="statusbar" statusbar_visible="draft,mapped,review,ready,done"/>
+                </header>
+                <sheet>
+                    <div class="alert alert-info" role="alert" invisible="state != 'draft'">
+                        Start with existing product matches. Enable both companies in the company switcher.
+                        This is an opening-stock cutover, not a transfer of historical sales or manufacturing orders.
+                    </div>
+                    <div class="alert alert-info" role="alert" invisible="state != 'mapped'">
+                        Select products and warehouses below. No warehouse is selected automatically.
+                        Prepare Locations, review the location and lot matches, then Build Preview.
+                        These steps do not move stock.
+                    </div>
+                    <div class="alert alert-warning" role="alert" invisible="state not in ['review', 'ready']">
+                        Review the quantities and FIFO costs before applying. Pause inventory operations across the database
+                        for the cutover. Any changed stock or mapping requires a fresh preview and check.
+                    </div>
+                    <div class="alert alert-success" role="alert" invisible="state != 'done'">
+                        Completed. Review the reconciliation and new stock movements below.
+                        Historical transactions remain in the Source Company.
+                    </div>
+                    <div class="oe_title">
+                        <label for="name"/>
+                        <h1><field name="name"/></h1>
+                    </div>
+                    <group>
+                        <group string="Move From">
+                            <field name="source_company_id" string="Source Company"
+                                   options="{'no_create': True}" readonly="state != 'draft'"/>
+                            <field name="source_clearing_account_id" string="Source Cutover Account"
+                                   domain="[('company_ids', 'in', [source_company_id]), ('active', '=', True), ('account_type', 'in', ['asset_current', 'equity'])]"
+                                   options="{'no_create': True}" readonly="state == 'done'"/>
+                        </group>
+                        <group string="Move To">
+                            <field name="target_company_id" string="Target Company"
+                                   domain="[('id', '!=', source_company_id)]"
+                                   options="{'no_create': True}" readonly="state != 'draft'"/>
+                            <field name="target_clearing_account_id" string="Target Cutover Account"
+                                   domain="[('company_ids', 'in', [target_company_id]), ('active', '=', True), ('account_type', 'in', ['asset_current', 'equity'])]"
+                                   options="{'no_create': True}" readonly="state == 'done'"/>
+                        </group>
+                    </group>
+                    <div invisible="state == 'done'">
+                        <button name="action_create_clearing_accounts" type="object"
+                                string="Create Clearing Accounts" class="btn-secondary"
+                                invisible="source_clearing_account_id and target_clearing_account_id"
+                                confirm="Create or reuse a company-specific Stock Migration Clearing account for each empty cutover-account field? New accounts use Current Assets. Existing selections are kept. No stock or journal entries are created; have your accountant review the accounts before moving stock."/>
+                        <p class="text-muted">
+                            Choose your accountant-approved accounts, or click Create Clearing Accounts.
+                            The button fills empty fields only. New accounts are Current Assets, not expenses;
+                            they remain in the chart of accounts if this tool is uninstalled.
+                            Preview never creates accounts.
+                        </p>
+                    </div>
+                    <group string="Cutover Details">
+                        <field name="mapping_batch_ref" string="Existing Product / Kit Matches"
+                               options="{'no_create': True}" readonly="state != 'draft'"/>
+                        <field name="cutover_at" string="Cutover Date and Time" readonly="state == 'done'"/>
+                        <field name="currency_id" invisible="1"/>
+                        <field name="partial_selection" invisible="1"/>
+                    </group>
+                    <p invisible="state == 'done'">
+                        Ask your accountant to choose the cutover accounts. Both companies must use the same currency;
+                        products must use FIFO with automatic inventory valuation. The Target products must have no stock history.
+                    </p>
+                    <notebook invisible="state == 'draft'">
+                        <page string="1. Products" name="products">
+                            <p>Untick products you do not want to move. Quantities use each product's inventory unit.</p>
+                            <field name="product_line_ids" nolabel="1">
+                                <list create="0" delete="0" editable="bottom" decoration-muted="not selected">
+                                    <field name="batch_state" column_invisible="True"/>
+                                    <field name="currency_id" column_invisible="True"/>
+                                    <field name="selected" readonly="batch_state == 'done'"/>
+                                    <field name="source_product_id" string="Source Product" readonly="1"/>
+                                    <field name="target_product_id" string="Target Product" readonly="1"/>
+                                    <field name="company_quantity" string="All Source Stock"/>
+                                    <field name="source_quantity" string="Selected Warehouse Stock"/>
+                                    <field name="company_value" string="All Source Stock Value" optional="show"/>
+                                    <field name="opening_value" string="Reviewed Opening Value"/>
+                                </list>
+                            </field>
+                        </page>
+                        <page string="2. Warehouses" name="warehouses">
+                            <p>
+                                Tick only the warehouses to include. Use an existing Target warehouse with matching
+                                receiving and delivery steps, or Recreate it with a reviewed name and short code.
+                                Recreate uses Odoo's own warehouse setup; routes are not copied from the old company.
+                                Clear Existing Target Warehouse when choosing Recreate.
+                            </p>
+                            <field name="warehouse_line_ids" nolabel="1">
+                                <list create="0" delete="0" editable="bottom" decoration-muted="not selected">
+                                    <field name="batch_state" column_invisible="True"/>
+                                    <field name="target_company_id" column_invisible="True"/>
+                                    <field name="selected" readonly="batch_state == 'done'"/>
+                                    <field name="source_warehouse_id" string="Source Warehouse" readonly="1"/>
+                                    <field name="action" string="Target Warehouse Setup" readonly="batch_state == 'done'"/>
+                                    <field name="target_warehouse_id" string="Existing Target Warehouse"
+                                           domain="[('company_id', '=', target_company_id), ('active', '=', True)]"
+                                           options="{'no_create': True}"
+                                           readonly="batch_state == 'done'"/>
+                                    <field name="target_name" string="New Warehouse Name"
+                                           readonly="batch_state == 'done' or action != 'create'"/>
+                                    <field name="target_code" string="New Short Code"
+                                           readonly="batch_state == 'done' or action != 'create'"/>
+                                    <field name="created_warehouse_id" string="Created Warehouse" optional="hide"/>
+                                </list>
+                            </field>
+                        </page>
+                        <page string="3. Locations and Lots" name="locations_lots">
+                            <p>
+                                Prepare Locations first. Standard warehouse locations are matched automatically.
+                                For an existing warehouse, match every custom location to its equivalent in the Target
+                                warehouse. For Recreate, leave Target locations blank; they are created during Apply.
+                            </p>
+                            <field name="location_line_ids" nolabel="1">
+                                <list create="0" delete="0" editable="bottom">
+                                    <field name="batch_state" column_invisible="True"/>
+                                    <field name="target_company_id" column_invisible="True"/>
+                                    <field name="source_location_id" string="Source Location" readonly="1"/>
+                                    <field name="warehouse_line_id" string="Warehouse Selection" readonly="1" optional="hide"/>
+                                    <field name="target_location_id" string="Matching Target Location"
+                                           domain="[('company_id', '=', target_company_id), ('usage', 'in', ['view', 'internal', 'transit'])]"
+                                           context="{'active_test': False}" options="{'no_create': True}"
+                                           readonly="batch_state == 'done'"/>
+                                    <field name="created_location_id" string="Created Location" optional="hide"/>
+                                </list>
+                            </field>
+                            <separator string="Lots and Serial Numbers"/>
+                            <p>
+                                Create Same Lot keeps its identity and expiry dates. If that lot already exists in
+                                the Target Company, choose Use Existing and match it explicitly.
+                                Clear Existing Target Lot when choosing Create Same Lot.
+                            </p>
+                            <field name="lot_line_ids" nolabel="1">
+                                <list create="0" delete="0" editable="bottom">
+                                    <field name="batch_state" column_invisible="True"/>
+                                    <field name="target_company_id" column_invisible="True"/>
+                                    <field name="source_lot_id" string="Source Lot / Serial" readonly="1"/>
+                                    <field name="target_product_id" string="Target Product" readonly="1"/>
+                                    <field name="source_quantity" string="Selected Quantity"/>
+                                    <field name="action" string="Lot Setup" readonly="batch_state == 'done'"/>
+                                    <field name="target_lot_id" string="Existing Target Lot / Serial"
+                                           domain="[('company_id', '=', target_company_id), ('product_id', '=', target_product_id)]"
+                                           options="{'no_create': True}"
+                                           readonly="batch_state == 'done'"/>
+                                    <field name="created_lot_id" string="Created Lot / Serial" optional="hide"/>
+                                </list>
+                            </field>
+                        </page>
+                        <page string="4. FIFO Cost Preview" name="fifo" invisible="state == 'mapped'">
+                            <p>
+                                These are the remaining receipt costs, in oldest-first consumption order.
+                                The cost pool belongs to the company, not to an individual warehouse.
+                            </p>
+                            <div class="alert alert-warning" role="alert" invisible="not partial_selection">
+                                This is a partial transfer. Allocate the selected warehouse quantity from the oldest
+                                remaining costs first. Do not skip an older receipt to choose a newer cost.
+                                Review the whole-company quantity alongside the selected warehouse quantity.
+                            </div>
+                            <field name="tranche_line_ids" nolabel="1">
+                                <list create="0" delete="0" editable="bottom">
+                                    <field name="batch_state" column_invisible="True"/>
+                                    <field name="currency_id" column_invisible="True"/>
+                                    <field name="sequence" column_invisible="True"/>
+                                    <field name="source_product_id" string="Product" readonly="1"/>
+                                    <field name="source_move_id" string="Original Receipt" readonly="1"/>
+                                    <field name="source_date" string="Receipt Date"/>
+                                    <field name="source_lot_id" string="Lot / Serial" readonly="1" optional="show"/>
+                                    <field name="available_quantity" string="Remaining Quantity"/>
+                                    <field name="selected_quantity" string="Quantity to Move"
+                                           readonly="batch_state == 'done' or not parent.partial_selection"/>
+                                    <field name="unit_value" string="Unit Cost" options="{'digits': [16, 6]}"/>
+                                    <field name="allocated_value" string="Opening Value"/>
+                                </list>
+                            </field>
+                            <group invisible="not partial_selection">
+                                <field name="allocation_reviewed" readonly="state == 'done'"/>
+                            </group>
+                            <separator string="Warehouse Setup to Review"/>
+                            <field name="warehouse_review" nolabel="1"/>
+                        </page>
+                        <page string="Reconciliation" name="reconciliation" invisible="state != 'done'">
+                            <p>Every selected product must reconcile in quantity and value. The differences should be zero.</p>
+                            <field name="rounding_note" nolabel="1" invisible="not rounding_note"/>
+                            <field name="product_line_ids" nolabel="1">
+                                <list create="0" delete="0" decoration-muted="not selected">
+                                    <field name="currency_id" column_invisible="True"/>
+                                    <field name="selected" optional="hide"/>
+                                    <field name="source_product_id" string="Source Product"/>
+                                    <field name="target_product_id" string="Target Product"/>
+                                    <field name="source_quantity" string="Expected Quantity"/>
+                                    <field name="actual_quantity" string="Opening Quantity"/>
+                                    <field name="quantity_difference" string="Quantity Difference"/>
+                                    <field name="opening_value" string="Expected Value"/>
+                                    <field name="actual_value" string="Opening Value"/>
+                                    <field name="value_difference" string="Value Difference"/>
+                                </list>
+                            </field>
+                            <group>
+                                <field name="completed_at"/>
+                                <field name="completed_by_id"/>
+                            </group>
+                            <separator string="New Closing and Opening Stock Movements"/>
+                            <field name="created_move_ids" nolabel="1">
+                                <list create="0" delete="0">
+                                    <field name="company_id"/>
+                                    <field name="date"/>
+                                    <field name="product_id"/>
+                                    <field name="location_id"/>
+                                    <field name="location_dest_id"/>
+                                    <field name="quantity"/>
+                                    <field name="state" widget="badge"/>
+                                </list>
+                            </field>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="stock_fifo_migration_search_view" model="ir.ui.view">
+        <field name="name">company.stock.fifo.migration.search</field>
+        <field name="model">company.stock.fifo.migration</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="name"/>
+                <field name="source_company_id"/>
+                <field name="target_company_id"/>
+                <filter name="not_completed" string="In Progress" domain="[('state', '!=', 'done')]"/>
+                <filter name="completed" string="Completed" domain="[('state', '=', 'done')]"/>
+            </search>
+        </field>
+    </record>
+
+    <record id="stock_fifo_migration_action" model="ir.actions.act_window">
+        <field name="name">Move Opening Stock</field>
+        <field name="res_model">company.stock.fifo.migration</field>
+        <field name="view_mode">list,form</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">Prepare a reviewed opening-stock cutover</p>
+            <p>Match products, select warehouses, review locations and FIFO costs, check, then apply during your cutover.</p>
+        </field>
+    </record>
+
+    <menuitem id="stock_fifo_migration_menu" name="Move Opening Stock"
+              parent="stock.menu_warehouse_config" action="stock_fifo_migration_action"
+              groups="base.group_system" sequence="95"/>
+</odoo>

@@ -1,0 +1,57 @@
+<odoo>
+    <record id="warehouse_location_choice_company_rule" model="ir.rule">
+        <field name="name">Warehouse location choices require both companies</field>
+        <field name="model_id" ref="model_company_stock_warehouse_location_choice"/>
+        <field name="domain_force">[('cutover_id.source_company_id', 'in', company_ids), ('cutover_id.target_company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[(4, ref('base.group_system'))]"/>
+    </record>
+    <record id="warehouse_product_choice_company_rule" model="ir.rule">
+        <field name="name">Warehouse product choices require both companies</field>
+        <field name="model_id" ref="model_company_stock_warehouse_product_choice"/>
+        <field name="domain_force">[('cutover_id.source_company_id', 'in', company_ids), ('cutover_id.target_company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[(4, ref('base.group_system'))]"/>
+    </record>
+    <record id="whole_warehouse_cutover_company_rule" model="ir.rule">
+        <field name="name">Whole warehouse cutover requires both companies</field>
+        <field name="model_id" ref="model_company_stock_warehouse_cutover"/>
+        <field name="domain_force">[('source_company_id', 'in', company_ids), ('target_company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[(4, ref('base.group_system'))]"/>
+    </record>
+    <record id="stock_fifo_migration_company_rule" model="ir.rule">
+        <field name="name">Stock cutover requires both companies</field>
+        <field name="model_id" ref="model_company_stock_fifo_migration"/>
+        <field name="domain_force">[('source_company_id', 'in', company_ids), ('target_company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[(4, ref('base.group_system'))]"/>
+    </record>
+
+    <record id="stock_fifo_product_company_rule" model="ir.rule">
+        <field name="name">Stock cutover product review requires both companies</field>
+        <field name="model_id" ref="model_company_stock_fifo_product"/>
+        <field name="domain_force">[('batch_id.source_company_id', 'in', company_ids), ('batch_id.target_company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[(4, ref('base.group_system'))]"/>
+    </record>
+    <record id="stock_fifo_warehouse_company_rule" model="ir.rule">
+        <field name="name">Stock cutover warehouse review requires both companies</field>
+        <field name="model_id" ref="model_company_stock_fifo_warehouse"/>
+        <field name="domain_force">[('batch_id.source_company_id', 'in', company_ids), ('batch_id.target_company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[(4, ref('base.group_system'))]"/>
+    </record>
+    <record id="stock_fifo_location_company_rule" model="ir.rule">
+        <field name="name">Stock cutover location review requires both companies</field>
+        <field name="model_id" ref="model_company_stock_fifo_location"/>
+        <field name="domain_force">[('batch_id.source_company_id', 'in', company_ids), ('batch_id.target_company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[(4, ref('base.group_system'))]"/>
+    </record>
+    <record id="stock_fifo_lot_company_rule" model="ir.rule">
+        <field name="name">Stock cutover lot review requires both companies</field>
+        <field name="model_id" ref="model_company_stock_fifo_lot"/>
+        <field name="domain_force">[('batch_id.source_company_id', 'in', company_ids), ('batch_id.target_company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[(4, ref('base.group_system'))]"/>
+    </record>
+    <record id="stock_fifo_tranche_company_rule" model="ir.rule">
+        <field name="name">Stock cutover tranche review requires both companies</field>
+        <field name="model_id" ref="model_company_stock_fifo_tranche"/>
+        <field name="domain_force">[('batch_id.source_company_id', 'in', company_ids), ('batch_id.target_company_id', 'in', company_ids)]</field>
+        <field name="groups" eval="[(4, ref('base.group_system'))]"/>
+    </record>
+</odoo>
