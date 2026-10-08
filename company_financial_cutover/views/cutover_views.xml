@@ -1,0 +1,119 @@
+<odoo>
+    <record id="financial_cutover_list" model="ir.ui.view">
+        <field name="name">company.financial.cutover.list</field>
+        <field name="model">company.financial.cutover</field>
+        <field name="arch" type="xml">
+            <list>
+                <field name="name"/>
+                <field name="source_company_id"/>
+                <field name="target_company_id"/>
+                <field name="cutover_date"/>
+                <field name="state" widget="badge"/>
+            </list>
+        </field>
+    </record>
+    <record id="financial_cutover_form" model="ir.ui.view">
+        <field name="name">company.financial.cutover.form</field>
+        <field name="model">company.financial.cutover</field>
+        <field name="arch" type="xml">
+            <form>
+                <header>
+                    <button name="action_match" type="object" string="1. Match Accounts and Contacts" invisible="state == 'done'"/>
+                    <button name="action_preview" type="object" string="2. Preview Opening" class="oe_highlight" invisible="state == 'done'"/>
+                    <button name="action_apply" type="object" string="3. Confirm Financial Opening" class="oe_highlight" invisible="state != 'preview'"
+                        confirm="Post the reviewed financial opening in the new company? Confirm a verified backup, stop accounting activity, and review the trial balance and unpaid items. Source history stays in the old company. Run any separate stock cutover afterwards."/>
+                    <button name="action_open_entry" type="object" string="Open Posted Entry" invisible="state != 'done'"/>
+                    <field name="state" widget="statusbar" statusbar_visible="draft,preview,done"/>
+                </header>
+                <sheet>
+                    <div class="alert alert-info" role="status" invisible="state == 'done'">
+                        Open a fresh replacement company's accounts from posted balances and unpaid items at the cutover date.
+                        Destination accounts and settings are used. Historical invoices, tax reports and payments stay in the source.
+                        Run this financial opening before the stock mover and exclude inventory accounts that the stock mover will open.
+                    </div>
+                    <h1><field name="name"/></h1>
+                    <group>
+                        <group>
+                            <field name="source_company_id" readonly="state == 'done'"/>
+                            <field name="target_company_id" readonly="state == 'done'"/>
+                            <field name="cutover_date" readonly="state == 'done'"/>
+                            <field name="currency_id"/>
+                        </group>
+                        <group>
+                            <field name="journal_id" readonly="state == 'done'" required="True"
+                                domain="[('company_id', '=', target_company_id), ('type', '=', 'general')]"/>
+                            <field name="retained_earnings_account_id" readonly="state == 'done'" required="True"
+                                context="{'allowed_company_ids': [target_company_id]}"
+                                domain="[('company_ids', 'in', [target_company_id]), ('account_type', 'in', ['equity', 'equity_unaffected'])]"/>
+                            <field name="offset_account_id" readonly="state == 'done'"
+                                context="{'allowed_company_ids': [target_company_id]}"
+                                domain="[('company_ids', 'in', [target_company_id]), ('account_type', '=', 'asset_current')]"/>
+                            <button name="action_prepare_stock_clearing" type="object" string="Use Stock Mover's Clearing Account" invisible="state == 'done'"/>
+                        </group>
+                    </group>
+                    <field name="summary" invisible="not summary"/>
+                    <notebook>
+                        <page string="Account Choices">
+                            <field name="mapping_ids" readonly="state == 'done'">
+                                <list editable="bottom">
+                                    <field name="source_account_id" options="{'no_create': True}" context="{'allowed_company_ids': [parent.source_company_id]}"/>
+                                    <field name="target_account_id" options="{'no_create': True}"
+                                        context="{'allowed_company_ids': [parent.target_company_id]}"
+                                        domain="[('company_ids', 'in', [parent.target_company_id])]"/>
+                                    <field name="handled_by_stock"/>
+                                </list>
+                            </field>
+                        </page>
+                        <page string="Contact Choices">
+                            <field name="partner_mapping_ids" readonly="state == 'done'">
+                                <list editable="bottom">
+                                    <field name="source_partner_id" options="{'no_create': True}"/>
+                                    <field name="target_partner_id" options="{'no_create': True}"
+                                        domain="[('company_id', 'in', [False, parent.target_company_id])]"/>
+                                    <field name="create_contact"/>
+                                </list>
+                            </field>
+                        </page>
+                        <page string="Opening Reconciliation">
+                            <field name="line_ids">
+                                <list create="0" edit="0" delete="0">
+                                    <field name="sequence" column_invisible="True"/>
+                                    <field name="company_currency_id" column_invisible="True"/>
+                                    <field name="kind"/>
+                                    <field name="label"/>
+                                    <field name="source_account_id" optional="show"/>
+                                    <field name="target_account_id"/>
+                                    <field name="source_partner_id" optional="show"/>
+                                    <field name="target_partner_id" optional="show"/>
+                                    <field name="date_maturity" optional="show"/>
+                                    <field name="source_date" optional="show"/>
+                                    <field name="balance"/>
+                                    <field name="currency_id" optional="show"/>
+                                    <field name="amount_currency" optional="show"/>
+                                    <field name="source_line_id" optional="hide"/>
+                                    <field name="posted_line_id" optional="show"/>
+                                </list>
+                            </field>
+                        </page>
+                        <page string="Audit">
+                            <group>
+                                <field name="move_id"/>
+                                <field name="completed_at"/>
+                                <field name="completed_by"/>
+                                <field name="snapshot_hash"/>
+                            </group>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+    <record id="financial_cutover_action" model="ir.actions.act_window">
+        <field name="name">Move Financial Opening</field>
+        <field name="res_model">company.financial.cutover</field>
+        <field name="view_mode">list,form</field>
+    </record>
+    <menuitem id="financial_cutover_menu" name="Move Financial Opening"
+        parent="account.menu_finance_configuration" action="financial_cutover_action"
+        groups="account.group_account_manager" sequence="95"/>
+</odoo>

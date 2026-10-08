@@ -1,0 +1,22 @@
+<odoo>
+    <record id="cutover_company_rule" model="ir.rule">
+        <field name="name">Financial cutover requires both companies</field>
+        <field name="model_id" ref="model_company_financial_cutover"/>
+        <field name="domain_force">[('source_company_id', 'in', company_ids), ('target_company_id', 'in', company_ids)]</field>
+    </record>
+    <record id="account_mapping_company_rule" model="ir.rule">
+        <field name="name">Financial account choices require both companies</field>
+        <field name="model_id" ref="model_company_financial_account_mapping"/>
+        <field name="domain_force">[('cutover_id.source_company_id', 'in', company_ids), ('cutover_id.target_company_id', 'in', company_ids)]</field>
+    </record>
+    <record id="partner_mapping_company_rule" model="ir.rule">
+        <field name="name">Financial contact choices require both companies</field>
+        <field name="model_id" ref="model_company_financial_partner_mapping"/>
+        <field name="domain_force">[('cutover_id.source_company_id', 'in', company_ids), ('cutover_id.target_company_id', 'in', company_ids)]</field>
+    </record>
+    <record id="line_company_rule" model="ir.rule">
+        <field name="name">Financial preview amounts require both companies</field>
+        <field name="model_id" ref="model_company_financial_cutover_line"/>
+        <field name="domain_force">[('cutover_id.source_company_id', 'in', company_ids), ('cutover_id.target_company_id', 'in', company_ids)]</field>
+    </record>
+</odoo>

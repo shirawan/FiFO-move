@@ -1,0 +1,5 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_financial_cutover,Financial cutovers,model_company_financial_cutover,account.group_account_manager,1,1,1,1
+access_financial_account_mapping,Financial account choices,model_company_financial_account_mapping,account.group_account_manager,1,1,1,1
+access_financial_partner_mapping,Financial contact choices,model_company_financial_partner_mapping,account.group_account_manager,1,1,1,1
+access_financial_cutover_line,Financial reviewed amounts,model_company_financial_cutover_line,account.group_account_manager,1,1,1,1
