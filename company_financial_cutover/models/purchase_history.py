@@ -124,7 +124,14 @@ class FinancialCutover(models.Model):
             ("company_id", "=", self.source_company_id.id)], limit=MAX_PURCHASE_ORDERS + 1)
         if len(orders) > MAX_PURCHASE_ORDERS:
             raise UserError("Purchase migration is limited to 10,000 orders per cutover.")
-        return orders.partner_id
+        copied = set(self.env["company.financial.purchase.history"].sudo().search([
+            ("company_id", "=", self.target_company_id.id), ("source_company_id", "=", self.source_company_id.id),
+            ("source_order_res_id", "in", orders.ids)]).mapped("source_order_res_id"))
+        # Vendor choices are needed only for new history that can produce a
+        # replacement. Already copied, cancelled and received/billed history
+        # must not inflate the choices shown to the operator.
+        return orders.filtered(lambda order: order.id not in copied
+            and purchase_draft_advice(self._purchase_row(order), self.env)[0]).partner_id
 
     def _plan(self):
         rows, digest, count = super()._plan()
@@ -229,6 +236,15 @@ class PurchaseHistory(models.Model):
     target_order_id = fields.Many2one("purchase.order", readonly=True, copy=False, ondelete="restrict")
     replacement_vendor_id = fields.Many2one("res.partner", string="Chosen destination vendor", readonly=True,
         copy=False, ondelete="restrict")
+    destination_vendor_id = fields.Many2one("res.partner", string="Vendor for the new order",
+        compute="_compute_replacement_step")
+    current_original_status = fields.Char(string="Current status in the old company", compute="_compute_replacement_step")
+    replacement_note = fields.Char(compute="_compute_replacement_step")
+    replacement_step = fields.Selection([
+        ("vendor", "Choose a vendor"), ("cancel", "Cancel the original"),
+        ("prepare", "Prepare a draft"), ("created", "View the replacement"),
+        ("manual", "Manager review needed"),
+    ], compute="_compute_replacement_step")
     _unique_order = models.Constraint("UNIQUE(company_id, source_company_id, source_order_res_id)", "This purchase order already has migrated history in the new company.")
 
     @api.depends("original_state", "snapshot", "target_order_id")
@@ -239,6 +255,70 @@ class PurchaseHistory(models.Model):
             history.draft_eligible = eligible and not history.target_order_id
             history.draft_guidance = (history.env._("A replacement order already exists. Use View replacement order to review it; a second order will not be created.")
                 if history.target_order_id else guidance)
+
+    @api.depends("snapshot", "source_order_res_id", "target_order_id", "replacement_vendor_id",
+        "replacement_vendor_id.active", "replacement_vendor_id.company_id",
+        "cutover_id.partner_mapping_ids.target_partner_id", "cutover_id.partner_mapping_ids.target_partner_id.active")
+    def _compute_replacement_step(self):
+        for history in self:
+            # Saved history stays readable without old-company access. Current
+            # status is shown only when the caller can read the original order.
+            batch = history.cutover_id.sudo()
+            source = self.env["purchase.order"].browse(history.source_order_res_id).exists()
+            readable = True
+            try:
+                source.check_access("read")
+            except AccessError:
+                readable = False
+                source = self.env["purchase.order"]
+            mapping = batch.partner_mapping_ids.filtered(
+                lambda row: row.source_partner_id.id == (history.snapshot or {}).get("vendor_id"))
+            vendor = history.replacement_vendor_id or mapping.target_partner_id
+            if not vendor:
+                shared = self.env["res.partner"].sudo().browse((history.snapshot or {}).get("vendor_id")).exists()
+                if shared and not shared.company_id:
+                    vendor = shared
+            history.destination_vendor_id = vendor
+            history.current_original_status = (purchase_status_label(source.state, history.env) if source
+                else history.env._("Not available with your company access") if not readable
+                else history.env._("Original order unavailable"))
+            eligible, advice = purchase_draft_advice(history.snapshot or {}, history.env)
+            unchanged = False
+            if source and eligible and not history.target_order_id:
+                current = batch._purchase_row(source.sudo())
+                unchanged = all(current[key] == history.snapshot.get(key) for key in ("vendor_id", "currency_id", "lines", "dropship"))
+            if history.target_order_id:
+                step = "created"
+            elif not eligible or not source or not unchanged:
+                step = "manual"
+            elif not vendor or not vendor.active or vendor.company_id not in (self.env["res.company"], history.company_id):
+                step = "vendor"
+            elif source.state != "cancel":
+                step = "cancel"
+            else:
+                step = "prepare"
+            history.replacement_step = step
+            if not eligible:
+                note = advice
+            elif not readable:
+                note = history.env._("Ask an authorized operator with access to both companies to review the original order and prepare any replacement.")
+            elif not source:
+                note = history.env._("The original order is unavailable. Ask your purchase manager to review the saved history before continuing.")
+            elif not unchanged and not history.target_order_id:
+                note = history.env._("The original order changed after this history was copied. The quantities below are from copy time. Ask your purchase manager to review the current order before continuing.")
+            else:
+                note = False
+            history.replacement_note = note
+
+    def action_open_original(self):
+        self.ensure_one()
+        self.cutover_id._operator()
+        source = self.env["purchase.order"].browse(self.source_order_res_id).exists()
+        if not source:
+            raise UserError("The original order is unavailable. Ask your purchase manager to review the saved history.")
+        source.check_access("read")
+        return {"type": "ir.actions.act_window", "name": "Original order in the old company",
+            "res_model": "purchase.order", "res_id": source.id, "view_mode": "form", "target": "new"}
 
     @api.model_create_multi
     def create(self, vals_list):
@@ -348,10 +428,13 @@ class PurchaseHistory(models.Model):
             raise UserError("The replacement already exists. Review its vendor on that order.")
         mapping = self.cutover_id.partner_mapping_ids.filtered(
             lambda row: row.source_partner_id.id == self.snapshot["vendor_id"])
+        vendor = self.replacement_vendor_id or mapping.target_partner_id
+        if vendor and (not vendor.active or vendor.company_id not in (self.env["res.company"], self.company_id)):
+            vendor = self.env["res.partner"]
         return {"type": "ir.actions.act_window", "name": "Choose destination vendor",
             "res_model": "company.financial.purchase.vendor.choice", "view_mode": "form", "target": "new",
             "context": {**self.env.context, "default_history_id": self.id,
-                "default_vendor_id": (self.replacement_vendor_id or mapping.target_partner_id).id}}
+                "default_vendor_id": vendor.id}}
 
     def _choose_vendor(self, vendor):
         self.ensure_one()
@@ -443,6 +526,9 @@ class PurchaseVendorChoice(models.TransientModel):
     company_id = fields.Many2one(related="history_id.company_id")
     original_vendor = fields.Char(related="history_id.vendor_name")
     vendor_id = fields.Many2one("res.partner", string="Use this existing vendor", required=True)
+    vendor_reference = fields.Char(related="vendor_id.ref", string="Contact reference")
+    vendor_tax_id = fields.Char(related="vendor_id.vat", string="Tax ID")
+    vendor_email = fields.Char(related="vendor_id.email", string="Email")
 
     def action_confirm(self):
         self.ensure_one()

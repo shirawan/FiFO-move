@@ -11,6 +11,72 @@ from .test_purchase_history import PurchaseMigrationCase
 
 @tagged("post_install", "-at_install")
 class TestScopeAndRetention(PurchaseMigrationCase):
+    def test_vendor_choices_exclude_already_copied_and_cancelled_history(self):
+        first_vendor = self.env["res.partner"].create({"name": "First vendor", "company_id": self.source.id})
+        next_vendor = self.env["res.partner"].create({"name": "Next vendor", "company_id": self.source.id})
+        copied = self._order()
+        copied.partner_id = first_vendor
+        self._run(self._purchase_batch())
+        cancelled = self._order()
+        cancelled.partner_id = first_vendor
+        cancelled.button_cancel()
+        pending = self._order()
+        pending.partner_id = next_vendor
+        pending.partner_ref = "NEXT-ORDER"
+        batch = self._purchase_batch()
+        batch.action_match()
+        self.assertEqual(batch.partner_mapping_ids.source_partner_id, next_vendor)
+        self.assertIn("Vendors needing a choice: 1", batch.check_report)
+        batch.action_preview()
+        self.assertEqual({row["id"] for row in batch.purchase_preview_data}, {cancelled.id, pending.id})
+
+    def test_replacement_ui_guides_an_authorized_user_through_vendor_cancel_and_draft(self):
+        old = self.env["res.partner"].create({"name": "Local supplier", "company_id": self.source.id})
+        target = self.env["res.partner"].create({"name": "Local supplier", "company_id": self.target.id,
+            "ref": "NEW-SUPPLIER", "email": "supplier@example.test"})
+        original = self._order(confirmed=True)
+        original.partner_id = old
+        batch = self._run(self._purchase_batch())
+        operator = new_test_user(self.env(context={**self.env.context, "no_reset_password": True}),
+            login="replacement-ui-operator", groups="base.group_system,account.group_account_manager,purchase.group_purchase_user",
+            company_id=self.source.id, company_ids=[self.source.id, self.target.id])
+        history = batch.purchase_history_ids.with_user(operator).with_context(allowed_company_ids=[self.source.id, self.target.id])
+        self.assertEqual(history.replacement_step, "vendor")
+        self.assertEqual(history.current_original_status, "Confirmed order")
+        action = history.action_choose_vendor()
+        with Form(history.env[action["res_model"]].with_context(action["context"])) as chooser:
+            chooser.vendor_id = target
+            self.assertEqual(chooser.vendor_reference, "NEW-SUPPLIER")
+            self.assertEqual(chooser.vendor_email, "supplier@example.test")
+        chooser.record.action_confirm()
+        self.assertEqual(history.replacement_step, "cancel")
+        self.assertEqual(history.destination_vendor_id, target)
+        original_action = history.action_open_original()
+        self.assertEqual((original_action["res_model"], original_action["res_id"], original_action["target"]),
+            ("purchase.order", original.id, "new"))
+        self.assertEqual(original.state, "purchase")
+        original.button_cancel()
+        history.invalidate_recordset()
+        self.assertEqual(history.replacement_step, "prepare")
+        self.assertEqual(history.current_original_status, "Cancelled")
+        history.action_prepare_draft()
+        self.assertEqual(history.replacement_step, "created")
+        replacement = history.target_order_id
+        self.assertEqual((replacement.state, replacement.partner_id), ("draft", target))
+        history.action_prepare_draft()
+        self.assertEqual(history.target_order_id, replacement)
+
+    def test_replacement_ui_sends_changed_originals_to_manager_review(self):
+        original = self._order(confirmed=True)
+        history = self._run(self._purchase_batch()).purchase_history_ids
+        self.assertEqual(history.replacement_step, "cancel")
+        original.order_line.qty_received_manual = 2
+        history.invalidate_recordset()
+        self.assertEqual(history.replacement_step, "manual")
+        self.assertIn("original order changed", history.replacement_note)
+        self.assertEqual(history.snapshot["lines"][0]["received"], 0)
+        self.assertFalse(history.target_order_id)
+
     def test_purchase_only_name_match_can_be_chosen_before_original_cancellation(self):
         old = self.env["res.partner"].create({"name": "Local supplier", "company_id": self.source.id})
         target = self.env["res.partner"].create({"name": "Local supplier", "company_id": self.target.id})
@@ -20,7 +86,7 @@ class TestScopeAndRetention(PurchaseMigrationCase):
         batch.action_match()
         self.assertEqual(batch.partner_mapping_ids.source_partner_id, old)
         self.assertFalse(batch.partner_mapping_ids.target_partner_id)
-        self.assertIn("vendors need a choice", batch.check_report)
+        self.assertIn("Vendors needing a choice: 1", batch.check_report)
         with Form(batch) as form:
             with form.partner_mapping_ids.edit(0) as choice:
                 choice.target_partner_id = target

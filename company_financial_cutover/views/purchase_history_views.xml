@@ -18,34 +18,56 @@
             <form create="0" edit="0" delete="0" duplicate="0">
                 <header>
                     <button name="action_choose_vendor" type="object" string="Choose destination vendor"
-                        groups="account.group_account_manager" invisible="not draft_eligible or target_order_id"/>
+                        class="oe_highlight" groups="account.group_account_manager" invisible="replacement_step != 'vendor'"/>
+                    <button name="action_open_original" type="object" string="Open original order"
+                        class="oe_highlight" groups="account.group_account_manager" invisible="replacement_step != 'cancel'"/>
                     <button name="action_prepare_draft" type="object" string="Prepare replacement draft" class="oe_highlight"
                         groups="account.group_account_manager"
-                        invisible="not draft_eligible or target_order_id"
+                        invisible="replacement_step != 'prepare'"
                         confirm="Prepare one unconfirmed draft in the new company? Review its vendor, products, prices and taxes before confirming. The original order must already be cancelled so it cannot be received or billed twice."/>
                     <button name="action_prepare_draft" type="object" string="View replacement order" class="oe_highlight"
                         groups="account.group_account_manager" invisible="not target_order_id"/>
-                    <field name="draft_eligible" invisible="True"/>
+                    <button name="action_choose_vendor" type="object" string="Change vendor"
+                        groups="account.group_account_manager" invisible="replacement_step not in ['cancel', 'prepare']"/>
+                    <field name="replacement_step" invisible="True"/>
                 </header>
                 <sheet>
-                    <div class="alert alert-info" role="status"><strong>Saved purchase history</strong>
-                        <p class="mb-0">This copy shows the order as it was when approved for the move. Receipts, payments and vendor bills were not recreated. Remaining quantities below are from that time.</p></div>
                     <h1><field name="name"/></h1>
+                    <p class="text-muted">Saved purchase history. Quantities and amounts show the order when copied. Receipts and bills were not recreated.</p>
+                    <div class="alert alert-info" role="status" invisible="replacement_step != 'vendor'">
+                        <strong>Step 1 of 3: Choose the vendor for the new order.</strong>
+                        <p class="mb-0">Click Choose destination vendor and select the correct existing contact. This saves your choice; it does not create an order.</p>
+                    </div>
+                    <div class="alert alert-info" role="status" invisible="replacement_step != 'cancel'">
+                        <strong>Step 2 of 3: Cancel the original order in the old company.</strong>
+                        <p class="mb-0">Click Open original order, check the company and order number, then cancel it in Odoo. Return here afterwards to prepare the replacement draft. This avoids having two active orders.</p>
+                    </div>
+                    <div class="alert alert-success" role="status" invisible="replacement_step != 'prepare'">
+                        <strong>Step 3 of 3: Prepare and review the replacement draft.</strong>
+                        <p class="mb-0">The original order is cancelled. Click Prepare replacement draft, then check the vendor, products, prices and taxes before confirming the new order.</p>
+                    </div>
+                    <div class="alert alert-success" role="status" invisible="replacement_step != 'created'">
+                        <strong>A replacement order is already linked.</strong>
+                        <p class="mb-0">Click View replacement order to check its current status. You will open the existing order.</p>
+                    </div>
+                    <div class="alert alert-warning" role="status" invisible="replacement_step != 'manual'">
+                        <strong>Ask your purchase manager to review this order.</strong>
+                        <p class="mb-0"><field name="replacement_note" nolabel="1"/></p>
+                    </div>
                     <group>
-                        <group string="Original order">
-                            <field name="vendor_name" string="Vendor"/><field name="original_status_label"/>
+                        <group string="Original order when copied">
+                            <field name="vendor_name" string="Vendor"/><field name="original_status_label" string="Status when copied"/>
                             <field name="order_date" string="Order date"/><field name="source_company_name"/>
-                        </group>
-                        <group string="New company">
-                            <field name="company_id" string="New company" options="{'no_open': True}"/>
                             <field name="currency_id" options="{'no_open': True}"/>
-                            <field name="amount_total" string="Order total"/>
-                            <field name="replacement_vendor_id" options="{'no_create': True}" invisible="not replacement_vendor_id"/>
+                            <field name="amount_total" string="Original order total"/>
+                        </group>
+                        <group string="Replacement order">
+                            <field name="company_id" string="New company" options="{'no_open': True}"/>
+                            <field name="destination_vendor_id" options="{'no_create': True, 'no_open': True}" invisible="not destination_vendor_id"/>
+                            <field name="current_original_status"/>
                             <field name="target_order_id" string="Replacement order" invisible="not target_order_id"/>
                         </group>
                     </group>
-                    <div class="alert alert-secondary" role="status"><p class="mb-1"><strong>What happens next</strong></p>
-                        <field name="draft_guidance" nolabel="1"/></div>
                     <separator string="Products and remaining quantities"/>
                     <field name="details_html" nolabel="1"/>
                     <field name="original_note" invisible="not original_note"/>
@@ -64,12 +86,17 @@
                     <field name="original_vendor" string="Old company vendor"/>
                     <field name="company_id" string="New company" options="{'no_open': True}"/>
                     <field name="vendor_id" options="{'no_create': True}"
-                        context="{'allowed_company_ids': [company_id]}"
+                        context="{'allowed_company_ids': [company_id], 'show_email': True, 'show_vat': True}"
                         domain="[('company_id', 'in', [False, company_id]), ('active', '=', True)]"/>
+                </group>
+                <group string="Check this is the correct vendor" invisible="not vendor_id">
+                    <field name="vendor_reference"/>
+                    <field name="vendor_tax_id"/>
+                    <field name="vendor_email"/>
                 </group>
                 <p>If the correct vendor is missing, create or reactivate it in Contacts for the new company, then return here.</p>
                 <footer>
-                    <button name="action_confirm" type="object" string="Use selected vendor" class="btn-primary"/>
+                    <button name="action_confirm" type="object" string="Use this vendor" class="btn-primary"/>
                     <button special="cancel" string="Cancel" class="btn-secondary"/>
                 </footer>
             </form>

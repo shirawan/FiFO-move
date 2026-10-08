@@ -454,7 +454,7 @@ class FinancialCutover(models.Model):
         for row in rows:
             mapping = mappings.get(row["source_account_id"])
             if not mapping:
-                raise UserError("Click 1. Check existing data, then review the choices in Accounts and contacts.")
+                raise UserError("Click 1. Check existing data, then review the choices under Review matches.")
             source = mapping.source_account_id
             if mapping.handled_by_stock:
                 if source.account_type not in {"asset_current", "asset_non_current"} or row["kind"] == "open_item":

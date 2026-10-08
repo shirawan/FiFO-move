@@ -33,9 +33,8 @@ Tax control-account balances move without duplicating tax tags or taxable invoic
 ## Setup and guided steps
 
 The screen highlights the next step: **Check existing data → Review selected data →
-Move selected data**. Messages explain what needs attention and who can help. Reviewed
-amounts appear directly on the page; account choices stay under **Accounts and
-contacts** and **Accountant setup**. A completed move shows its result and the
+Move selected data** (or **Copy purchase history** for purchase-only moves). Messages explain what needs attention and who can help. Reviewed
+amounts appear directly on the page; account and contact choices stay under **Review matches** and **Accountant setup**. A completed move shows its result and the
 next stock step.
 
 1. Install this addon from your custom addons directory. In Apps, update the Apps
@@ -68,7 +67,7 @@ next stock step.
    earnings, stock exclusions and each unpaid item with the accountant. Rebuild
    Preview after any configuration, mapping or accounting changes.
 7. If moving financial balances, finish bank reconciliation in the old company on or before the cutover date. Unsettled outstanding receipts/payments, suspense and interbank-transfer items block the financial move; these items are not carried individually. Pause writes, scheduled jobs, queue workers and other users across this database during the move window. Ask your Odoo administrator to stop cron workers, including cron workers in other Odoo processes; `--max-cron-threads=0` applies only to the process it starts.
-   Click **3. Move selected data**. Busy tables, changed
+   Click **3. Move selected data**, or **3. Copy purchase history** for purchase-only moves. Busy tables, changed
    previews, wrong posting dates or reconciliation differences refuse/roll back
    the operation. Review the completed data and, if financial balances were selected, **View opening entry**.
    Run the stock cutover afterwards on the same agreed date and with the same
@@ -98,11 +97,17 @@ receipt documents and purchase analytics are not copied into native Purchase
 reports; original records remain in the old company.
 
 For an order with **no received or billed quantities**, review its destination
-vendor in **Accounts and contacts**, or open saved history and use **Choose destination vendor**.
+vendor in **Review matches**, or open saved history and use **Choose destination vendor**.
 An explicit choice can resolve a name-only match, including older histories
 without saved contact mappings. Select an existing active destination/shared
 vendor; no contact or purchase order is created by this choice. Then cancel the original order
-in the old company and use **Prepare replacement draft**.
+in the old company and use **Prepare replacement draft**. The saved history
+screen shows one primary next action: choose a vendor, open the original order
+for cancellation, prepare a draft, or view the already linked replacement.
+Opening the original uses a normal Odoo order window; this addon does not
+cancel it automatically. Close that window to return to refreshed guidance.
+Changed or unavailable originals are directed to purchase manager review.
+The vendor chooser shows the selected contact's reference, tax ID and email.
 Cancellation is required before creating the draft, so uninstalling cannot leave
 both orders active. This action reuses eligible existing
 vendor/product records, applies the destination vendor's fiscal position to the

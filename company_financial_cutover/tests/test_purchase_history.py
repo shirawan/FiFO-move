@@ -209,6 +209,8 @@ class TestPurchaseMigration(PurchaseMigrationCase):
             groups="purchase.group_purchase_user", company_id=self.target.id, company_ids=[Command.set(self.target.ids)])
         visible = history.with_user(buyer).with_context(allowed_company_ids=self.target.ids)
         self.assertEqual(visible.read(["name", "vendor_name", "details_html", "original_status_label", "draft_guidance", "draft_eligible"])[0]["name"], history.name)
+        self.assertEqual(visible.current_original_status, "Not available with your company access")
+        self.assertEqual(visible.replacement_step, "manual")
         with self.assertRaises(AccessError):
             visible.action_prepare_draft()
         outsider = new_test_user(self.env(context={**self.env.context, "no_reset_password": True}), login="other-purchase-reader",
