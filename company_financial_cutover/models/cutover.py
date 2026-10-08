@@ -3,7 +3,7 @@ import json
 import re
 from collections import defaultdict
 
-from psycopg2.errors import LockNotAvailable
+from psycopg2.errors import LockNotAvailable, SerializationFailure
 
 from odoo import Command, api, fields, models
 from odoo.exceptions import AccessError, UserError
@@ -128,6 +128,9 @@ class FinancialCutover(models.Model):
             raise UserError("This cutover is already completed.")
         if source == target or source.currency_id != target.currency_id:
             raise UserError("Choose different companies with the same accounting currency.")
+        if any(company.sudo().parent_id or company.sudo().all_child_ids for company in (source, target)):
+            raise UserError("Companies with branches need a separately reviewed cutover. "
+                "This mover handles standalone companies; branch balances are not included automatically.")
         if self.cutover_date > fields.Date.context_today(self):
             raise UserError("The cutover date cannot be in the future.")
         # Check across all previous destinations, including companies hidden by
@@ -418,7 +421,7 @@ class FinancialCutover(models.Model):
         if not self.currency_id.is_zero(sum(row["balance"] for row in included)):
             raise UserError("The generated opening does not balance. No rounding or write-off line is added to hide differences.")
         evidence = {
-            "companies": [self._signature(c, ("name", "currency_id", "fiscalyear_last_day", "fiscalyear_last_month", "account_fiscal_country_id"))
+            "companies": [self._signature(c, ("name", "currency_id", "parent_id", "fiscalyear_last_day", "fiscalyear_last_month", "account_fiscal_country_id"))
                 for c in (self.source_company_id | self.target_company_id)],
             "currencies": [self._signature(c, ("rounding", "active")) for c in lines.currency_id],
             "date": str(self.cutover_date), "fiscal_start": str(fiscal_start),
@@ -449,24 +452,53 @@ class FinancialCutover(models.Model):
 
     def _lock(self):
         self.env.flush_all()
+        self.env.cr.execute("SELECT txid_current_snapshot()::text")
+        snapshot = self.env.cr.fetchone()[0]
         try:
             with self.env.cr.savepoint():
                 self.env.cr.execute("""
                     LOCK TABLE account_move, account_move_line, account_partial_reconcile, account_payment,
                     account_account, account_journal, res_partner, res_company, res_currency,
-                    ir_config_parameter,
+                    account_tax, account_tax_repartition_line, res_currency_rate, ir_config_parameter,
                     company_financial_cutover, company_financial_account_mapping,
                     company_financial_partner_mapping, company_financial_cutover_line
                     IN SHARE ROW EXCLUSIVE MODE NOWAIT
                 """)
         except LockNotAvailable as exc:
             raise UserError("Accounting is busy. Stop accounting activity and retry during the cutover maintenance window.") from exc
+        self._assert_fresh_snapshot(snapshot)
         companies = self.source_company_id | self.target_company_id
         companies.check_access("write")
         # Odoo uses repeatable-read transactions. A real row update forces a
         # concurrent stale request to retry rather than reuse an old snapshot.
         self.env.cr.execute("UPDATE res_company SET write_date = write_date WHERE id = ANY(%s)", [companies.ids])
+        self.env.cr.execute("UPDATE company_financial_cutover SET write_date = write_date WHERE id = %s", [self.id])
         self.env.invalidate_all()
+
+    def _assert_fresh_snapshot(self, snapshot):
+        """Restart the whole request if a commit escaped its repeatable-read view.
+
+        Table locks stop future writes, but a commit between the first ORM read
+        and lock acquisition is invisible to the original transaction. An
+        independent primary cursor sees its status. Check every intervening
+        transaction, including ones already running at the original snapshot,
+        so inserted/deleted rows are covered too. Odoo retries serialization
+        failures with a new transaction; a savepoint alone cannot refresh it.
+        """
+        _xmin, xmax, running = snapshot.split(":")
+        xmax = int(xmax)
+        candidates = {int(xid) for xid in running.split(",") if xid}
+        with self.env.registry.cursor() as fresh:
+            fresh.execute("SELECT txid_snapshot_xmax(txid_current_snapshot())")
+            latest = fresh.fetchone()[0]
+            if latest - xmax > 1000:
+                raise SerializationFailure("Accounting snapshot is too old; retry the full request.")
+            candidates.update(range(xmax, latest))
+            if candidates:
+                fresh.execute("SELECT EXISTS (SELECT 1 FROM unnest(%s::bigint[]) AS xid "
+                    "WHERE txid_status(xid) = 'committed')", [sorted(candidates)])
+                if fresh.fetchone()[0]:
+                    raise SerializationFailure("A transaction committed before cutover locks; retry the full request.")
 
     def action_prepare_stock_clearing(self):
         self.ensure_one()

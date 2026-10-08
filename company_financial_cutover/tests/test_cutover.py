@@ -1,7 +1,9 @@
 from datetime import date
 from unittest.mock import patch
 
-from odoo import Command
+from psycopg2.errors import SerializationFailure
+
+from odoo import Command, api
 from odoo.exceptions import AccessError, UserError
 from odoo.tests import Form, TransactionCase, tagged, new_test_user
 
@@ -507,6 +509,25 @@ class TestFinancialCutover(TransactionCase):
         with self.assertRaisesRegex(UserError, "already has a completed"):
             batch.action_preview()
 
+    def test_hidden_or_archived_source_branch_is_not_silently_omitted(self):
+        self._invoice()
+        self.env["res.company"].create({"name": "Archived source branch", "parent_id": self.source.id, "active": False})
+        batch = self._batch()
+        batch.action_match()
+        self.assertEqual(batch.check_status, "blocked")
+        with self.assertRaisesRegex(UserError, "branch balances"):
+            batch.action_preview()
+
+    def test_destination_branch_added_after_preview_is_blocked(self):
+        self._invoice()
+        batch = self._batch()
+        batch.action_match()
+        batch.action_preview()
+        self.env["res.company"].create({"name": "Destination branch", "parent_id": self.target.id})
+        with self.assertRaisesRegex(UserError, "branch balances"):
+            batch.action_apply()
+        self.assertFalse(batch.move_id)
+
     def test_existing_settings_are_suggested_without_creating_accounts(self):
         self._invoice()
         before = self.env["account.account"].search_count([])
@@ -520,3 +541,50 @@ class TestFinancialCutover(TransactionCase):
         self.assertEqual(self.env["account.account"].search_count([]), before)
         batch.partner_mapping_ids.create_contact = True
         self.assertEqual(batch.check_status, "unchecked")
+
+
+@tagged("post_install", "-at_install")
+class TestSnapshotFreshness(TransactionCase):
+    """Independent database transactions exercise PostgreSQL snapshot behavior."""
+
+    def _check(self, cursor, snapshot):
+        env = api.Environment(cursor, self.env.uid, self.env.context)
+        env["company.financial.cutover"]._assert_fresh_snapshot(snapshot)
+
+    def _snapshot(self, cursor):
+        cursor.execute("SELECT txid_current_snapshot()::text")
+        return cursor.fetchone()[0]
+
+    def test_new_commit_after_first_read_requires_full_retry(self):
+        with self.registry.cursor() as original:
+            snapshot = self._snapshot(original)
+            with self.registry.cursor() as concurrent:
+                concurrent.execute("SELECT txid_current()")
+                concurrent.commit()
+            with self.assertRaises(SerializationFailure):
+                self._check(original, snapshot)
+
+    def test_already_running_transaction_committing_requires_full_retry(self):
+        with self.registry.cursor() as concurrent, self.registry.cursor() as original:
+            concurrent.execute("SELECT txid_current()")
+            snapshot = self._snapshot(original)
+            concurrent.commit()
+            with self.assertRaises(SerializationFailure):
+                self._check(original, snapshot)
+
+    def test_uncommitted_and_own_subtransactions_do_not_require_retry(self):
+        with self.registry.cursor() as concurrent, self.registry.cursor() as original:
+            concurrent.execute("SELECT txid_current()")
+            snapshot = self._snapshot(original)
+            with original.savepoint():
+                original.execute("SELECT txid_current()")
+                self._check(original, snapshot)
+            concurrent.rollback()
+            self._check(original, snapshot)
+
+    def test_commits_before_first_read_are_already_visible(self):
+        with self.registry.cursor() as concurrent:
+            concurrent.execute("SELECT txid_current()")
+            concurrent.commit()
+        with self.registry.cursor() as original:
+            self._check(original, self._snapshot(original))

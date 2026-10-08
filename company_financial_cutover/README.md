@@ -69,11 +69,14 @@ company ends with bank 50, inventory 100, equity -150 and clearing zero.
 
 ## Boundaries
 
+- Choose standalone companies. Companies or branches in a branch hierarchy need a separately reviewed cutover, so branch balances are never silently omitted.
+
 - This transfers opening balances and open items, rather than repairing source
   ledger errors or migrating full accounting history. Source posted entries must
   balance. Existing source/target configuration errors and ambiguous mappings
   need review before posting. The destination is a new ledger, not a merger into
   an already active ledger.
+- Concurrent commits before lock acquisition trigger a full Odoo request retry with a fresh database snapshot. Keep accounting activity paused during the move.
 - Draft entries, unposted payments, archived contacts and contacts added after preview are checked before posting. A source completion marker also prevents repeating a move to a different replacement company or after reinstalling the addon. Possible duplicates among proposed new contacts need manual resolution.
 - Rebuild the preview after changing source entries, reconciliations, contacts,
   account choices, currency precision or destination configuration. Completed

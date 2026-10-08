@@ -1,6 +1,6 @@
 {
     "name": "Company Financial Cutover",
-    "version": "19.0.1.1.0",
+    "version": "19.0.1.1.1",
     "summary": "Open a replacement company's ledger and unpaid customer/vendor items",
     "category": "Accounting/Accounting",
     "author": "FiFO-move contributors",
