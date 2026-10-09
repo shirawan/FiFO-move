@@ -1,0 +1,49 @@
+FiFO-move for Odoo 19
+
+FRESH FINANCIAL-ONLY INSTALL
+1. Back up your database and test on a restored copy.
+2. Copy company_financial_cutover into your configured addons directory.
+3. Restart Odoo, update the Apps list in developer mode, remove the Apps filter,
+   and install Company Financial Cutover. This installs Accounting, not Purchase.
+4. New moves default to Financial balances and unpaid items.
+
+OPTIONAL PURCHASE MIGRATION
+Copy company_purchase_cutover alongside the financial addon, restart Odoo,
+update the Apps list and explicitly install Company Purchase Cutover. It requires
+Odoo's Purchase app. Select Purchase orders or Both to copy all selected-company
+orders, including historical/cancelled orders, as read-only history.
+
+UPGRADE FROM THE COMBINED FINANCIAL ADDON (19.0.2.0.1)
+Copy BOTH company_financial_cutover and company_purchase_cutover folders before
+upgrading. Restart, update the Apps list and upgrade Company Financial Cutover.
+The migration installs the optional purchase addon to retain the purchase feature
+that was already installed, and transfers existing metadata ownership safely.
+Do not uninstall the old combined addon as an upgrade step.
+Existing entries, order links, saved history and archives are retained.
+A missing purchase addon folder stops this upgrade before data cleanup.
+
+STOCK (OPTIONAL)
+company_stock_fifo_migration requires Odoo Enterprise stock_accountant,
+product_expiry and the separate company_kit_bom_migration addon. These dependencies
+are not bundled. Run the financial opening before the stock move when using both.
+
+DAILY PURCHASE FOLLOW-UPS
+Purchase managers can choose vendors and prepare eligible replacement drafts.
+Select the original order's company and its destination in the company switcher.
+Cancel the original before preparing its replacement. Check the new draft before
+confirming; receipts and bills are not recreated.
+
+REMOVAL AND RECOVERY
+Uninstall through Odoo before deleting module files. Native posted financial
+entries, prepared purchase orders, private archives and duplicate markers survive.
+Reinstall restores completed history and native links without reposting/copying.
+One damaged archive is kept aside while valid archives recover. Settings admins
+use Accounting -> Company move recovery, restore missing original records/files
+from backup and select Retry recovery. Altered financial evidence is not accepted.
+Download the completed report before uninstalling. Unfinished previews must be rebuilt.
+
+DEVELOPMENT AND VALIDATION
+The full bundle includes README.md, all addon READMEs, tools/ and tests/.
+See README.md for the isolated Odoo/PostgreSQL setup and native tests.
+Use a restored copy to measure full cutover locks/scans and validate your installed
+modules; synthetic test timings do not establish production-size performance.

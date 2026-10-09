@@ -73,6 +73,8 @@
                         <field name="include_financial" invisible="True"/>
                         <field name="include_purchase_history" invisible="True"/>
                     </group>
+                    <field name="purchase_mover_available" invisible="True"/>
+                    <div class="alert alert-info" role="status" invisible="purchase_mover_available or not include_purchase_history">Purchase history needs the optional Company Purchase Cutover addon. Ask your administrator to install it, or select Financial balances.</div>
                     <field name="move_scope_description" nolabel="1" class="text-muted mb-3"/>
                     <group string="Your move">
                         <group>
@@ -178,25 +180,6 @@
                                     <field name="create_contact" column_invisible="not parent.include_financial"/>
                                 </list>
                             </field>
-                        </page>
-                        <page string="Purchase orders" name="purchase_orders" invisible="state != 'done' or (not include_purchase_history and not purchase_history_ids)">
-                            <p>All included orders become read-only history. After the move, open an order's history to see remaining quantities and whether a replacement draft can be prepared.</p>
-                            <field name="purchase_preview_html" nolabel="1" invisible="state == 'done' and not purchase_history_preview_ready"/>
-                            <field name="purchase_history_ids" nolabel="1" invisible="state != 'done'">
-                                <list create="0" edit="0" delete="0">
-                                    <field name="name" string="Original order"/>
-                                    <field name="vendor_name" string="Vendor"/>
-                                    <field name="original_status_label"/>
-                                    <field name="currency_id" column_invisible="True"/>
-                                    <field name="amount_total" string="Order total"/>
-                                    <field name="draft_guidance" string="Next step" optional="hide"/>
-                                    <field name="target_order_id" string="Replacement order"/>
-                                </list>
-                            </field>
-                            <separator string="Add missing purchase history" invisible="state != 'done'"/>
-                            <p invisible="state != 'done'">If orders are missing, review and copy only those orders. Existing copies are skipped and financial balances are not posted again.</p>
-                            <button name="action_preview_purchases" type="object" string="Review missing purchase orders" invisible="state != 'done'"/>
-                            <button name="action_import_purchases" type="object" string="Copy reviewed purchase history" class="oe_highlight" invisible="state != 'done' or not purchase_history_preview_ready" confirm="Copy the reviewed missing orders as read-only purchase history? Existing copies are skipped. The financial opening will not be posted again."/>
                         </page>
                         <page string="Accountant setup" name="accountant_setup" invisible="not include_financial">
                             <p>Your accountant completes these choices before you check existing data. Existing accounts are reused.</p>

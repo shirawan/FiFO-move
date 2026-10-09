@@ -12,7 +12,7 @@ years, or financial account choices, and never create an accounting entry.
 
 ## What moves
 
-- All purchase orders from the old company at preview time, including completed, cancelled and historical orders, copied as read-only purchase history in the new company.
+- With the optional **Company Purchase Cutover** addon selected: all purchase orders from the old company at preview time, including completed, cancelled and historical orders, copied as read-only purchase history in the new company.
 
 - Posted cash, bank, asset, liability and equity balances through the cutover date.
 - Current fiscal year's revenue and expense balances. Earlier years' net
@@ -30,6 +30,10 @@ customer/vendor payments and reconciliation in the destination. Historical
 invoices, payments, bank statements and tax reports remain in the source.
 Tax control-account balances move without duplicating tax tags or taxable invoices.
 
+New moves default to financial balances. Purchase-only and combined moves require
+the separate optional Company Purchase Cutover addon. Installing the financial
+addon alone does not install Odoo's Purchase app.
+
 ## Setup and guided steps
 
 The screen highlights the next step: **Check existing data → Review selected data →
@@ -38,7 +42,7 @@ amounts appear directly on the page; account and contact choices stay under **Re
 next stock step.
 
 1. Install this addon from your custom addons directory. In Apps, update the Apps
-   List and search for **Company Financial Cutover** with the Apps filter removed. Odoo installs its `account` and `purchase` dependencies.
+   List and search for **Company Financial Cutover** with the Apps filter removed. Odoo installs its `account` dependency. Purchase is optional: install **Company Purchase Cutover** separately if you need purchase migration.
 2. For financial balances, configure the replacement company's chart, journals and fiscal year correctly.
    Both companies must use the same accounting currency and fiscal year start.
    Choose whether the replacement has no accounting yet or is already in use.
@@ -78,6 +82,18 @@ next stock step.
    starting normal operations in the replacement.
 
 ### Purchase orders
+
+Install **Company Purchase Cutover** separately to enable these actions. The
+initial cutover still requires Settings and Accounting administrator rights.
+After go-live, a **Purchase manager** can choose vendors and prepare eligible
+replacement drafts with the original order's company and the new company selected;
+Settings and Accounting administrator roles are not required for these daily actions.
+Their locks cover only the selected history and its original/replacement orders.
+A native vendor-reference reservation prevents competing histories from creating duplicate replacements. A small private per-order follow-up preserves vendor choices and replacement links
+without rewriting the full completed archive or report. Daily actions do not scan
+financial tables. The saved completed report describes the completion checkpoint;
+subsequent follow-ups appear on the purchase history/order screens.
+
 
 Select **Purchase orders (read-only history)** or **Financial balances and
 purchase orders** in **Move** to include every source purchase order in the
@@ -201,7 +217,7 @@ restores their completed rows and native record links from the saved archives.
 Recovery never reposts the opening or creates replacement orders again.
 Recovery checks the opening's accounting identity, date, journal, accounts,
 partners, currencies and amounts against its saved evidence. Editing and
-reposting the native opening while the addon is uninstalled stops recovery for
+reposting the native opening while the addon is uninstalled keeps that archive pending for
 accountant review. Normal payment reconciliation remains valid. Older archives
 without a full native signature are checked against their saved financial rows.
 Explicit destination vendor choices also survive uninstall/reinstall.
@@ -211,7 +227,7 @@ can also find the private recovery JSON and report under Technical → Attachmen
 they are not visible to ordinary purchase users because financial details are
 included. Keep the database and filestore together in backups. Do not delete or
 change the archives or completion markers. Missing or changed recovery data
-stops restoration for administrator review.
+keeps that archive pending for administrator review; other valid archives recover.
 
 Only completed moves are archived; unfinished previews and unsaved choices must
 be rebuilt. Uninstall this addon through Odoo before removing its files. Custom
@@ -315,9 +331,29 @@ native openings/adjustments and restores links without reposting them.
   items. Larger migrations need separate sizing/review. The source company's
   financial cutover is one-time; do not split it into overlapping batches.
 
+## Recovery and large databases
+
+One damaged archive no longer prevents reinstalling the addons. Each archive
+recovers in its own savepoint. Valid archives restore normally; failed archives
+remain saved with their duplicate markers. A Settings administrator can open
+**Accounting → Company move recovery**, read the reason, restore the missing
+archive/record or original evidence from a verified backup, and click **Retry
+recovery**. This does not accept altered balances, delete duplicate markers or
+repost an opening. A move with pending recovery cannot prepare purchase replacements.
+
+The full cutover freshness guard scans every selected locked table. Its cost grows
+with table size and can repeat up to five times under concurrent activity. Use
+`tools/time_cutover_check.py` through Odoo shell on an isolated local restored
+`fifo_*` database, with `FIFO_TIMING_BATCH_ID` set to an unfinished reviewed move.
+It rolls back the full lock/check and prints its duration and a five-attempt
+estimate. Allow additional time for planning/posting and compare against the
+configured request timeout. Pause accounting/purchase writes and cron/queue workers
+for the cutover window. No production-size timing is claimed by the synthetic tests.
+
 ## Validation
 
-Run `bash tools/test_financial.sh` from the repository root. The suite exercises
+Run `bash tools/test_financial_only.sh` to verify a fresh install without Purchase,
+and `bash tools/test_financial.sh` from the repository root. The suite exercises
 native invoices and bills, partial/later payments, credit balances, foreign
 currencies, retained earnings, inventory clearing, contact/account mapping,
 changed-preview checks, rollback, access control, forms, audit protection and
@@ -330,7 +366,7 @@ and reinstall, checking unchanged native data, archive bytes and markers,
 restored completed history, and prevention of duplicate recovery/copying.
 It also exercises concurrent native purchase approvals and a cloned disposable
 database where a native opening is changed while the addon is absent; reinstall
-must refuse that changed opening. No production data is used.
+must install successfully, keep that changed opening pending, and recover healthy archives without reposting. No production data is used.
 
 The development test runner temporarily pauses automatic vacuum only in its
 verified local PostgreSQL cluster and restores the original setting on exit.

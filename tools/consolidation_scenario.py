@@ -76,7 +76,7 @@ def build_consolidation(environment, prefix):
             order.button_cancel()
         orders |= order
     batch = scenario['company.financial.cutover'].create({'source_company_id': root.id,
-        'target_company_id': target.id, 'include_source_branches': True, 'destination_mode': 'existing',
+        'target_company_id': target.id, 'include_source_branches': True, 'include_purchase_history': True, 'destination_mode': 'existing',
         'prior_opening_move_ids': [Command.set(earlier.ids)], 'cutover_date': date.today(),
         'journal_id': journals[target.id]['general'].id})
     batch.action_match()

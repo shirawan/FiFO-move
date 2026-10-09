@@ -8,8 +8,10 @@ from pathlib import Path
 
 from odoo import Command, api
 from odoo.exceptions import ConcurrencyError, UserError
+from odoo.service.model import retrying
+from unittest.mock import patch
 
-assert env.cr.dbname.startswith("fifo_survival_tests_")
+assert env.cr.dbname.startswith(("fifo_survival_tests_", "fifo_upgrade_tests_"))
 mode = os.environ["FIFO_SURVIVAL_MODE"]
 fixture = Path(os.environ["FIFO_SURVIVAL_FIXTURE"])
 
@@ -92,6 +94,9 @@ if mode == "setup":
         'archive_key': combined.archive_key, 'histories': [history.snapshot for history in combined.purchase_history_ids],
         'replacement': branch_history.target_order_id.id})
     scenario_module.verify_consolidation(env, consolidation, True)
+    # Uninstall checkpoints may rewrite full archives; establish that baseline
+    # here and verify it stays unchanged through removal and recovery.
+    demo['company.financial.cutover']._archive_completed()
     archives = combined.archive_attachment_id | combined.report_attachment_id | financial.archive_attachment_id | financial.report_attachment_id | purchases.archive_attachment_id | purchases.report_attachment_id
     data = {"consolidation": consolidation, "source": source.id, "target": target.id, "invoice": invoice.id,
         "opening": financial.move_id.id, "original": original.id, "replacement": history.target_order_id.id,
@@ -111,6 +116,35 @@ elif mode == "uninstall":
     module.button_uninstall()
     env.cr.commit()
     print("SURVIVAL: native Odoo uninstall requested.")
+elif mode == "bridge_uninstall":
+    env['ir.module.module'].search([('name', '=', 'company_purchase_cutover')]).button_uninstall()
+    env.cr.commit()
+    print('SURVIVAL: optional purchase addon uninstall requested; financial addon retained.')
+elif mode in {'bridge_absent', 'bridge_restored'}:
+    data = json.loads(fixture.read_text())
+    demo = env(context={**env.context, 'allowed_company_ids': [data['source'], data['target']]})
+    opening = demo['account.move'].browse(data['opening'])
+    replacement = demo['purchase.order'].browse(data['replacement'])
+    assert opening.state == 'posted' and opening.financial_cutover_id
+    assert replacement.state == 'draft'
+    assert demo['ir.module.module'].search([('name', '=', 'company_financial_cutover')]).state == 'installed'
+    assert demo['company.financial.cutover'].sudo().search_count([('state', '=', 'done')]) == 3
+    for key, value in data['markers'].items():
+        assert demo['ir.config_parameter'].sudo().get_param(key) == value
+    for attachment_id, digest in data['archives'].items():
+        assert hashlib.sha256(demo['ir.attachment'].sudo().browse(int(attachment_id)).raw).hexdigest() == digest
+    if mode == 'bridge_absent':
+        assert 'company.financial.purchase.history' not in demo
+        assert 'financial_purchase_history_id' not in replacement._fields
+        assert demo['ir.module.module'].search([('name', '=', 'company_purchase_cutover')]).state == 'uninstalled'
+        print('SURVIVAL: removing optional Purchase migration retains financial data, native orders and archives.')
+    else:
+        history = replacement.financial_purchase_history_id
+        assert history and history.target_order_id == replacement and history.snapshot == data['history_snapshot']
+        assert history.replacement_vendor_id.id == data['chosen_vendor']
+        assert demo['company.financial.purchase.history'].sudo().search_count([]) == 4
+        scenario_module.verify_consolidation(env, data['consolidation'], True)
+        print('SURVIVAL: optional Purchase reinstall restores histories and existing order links without duplicates.')
 elif mode == "change_opening":
     data = json.loads(fixture.read_text())
     demo = env(context={**env.context, "allowed_company_ids": [data["source"], data["target"]]})
@@ -123,6 +157,70 @@ elif mode == "change_opening":
     opening.action_post()
     env.cr.commit()
     print("SURVIVAL: native opening edited and reposted while addon is uninstalled and absent.")
+elif mode == "daily_locks":
+    data = json.loads(fixture.read_text())
+    context = {**env.context, "allowed_company_ids": [data["source"], data["target"]]}
+    history_id = env["purchase.order"].browse(data["replacement"]).financial_purchase_history_id.id
+    with env.registry.cursor() as first, env.registry.cursor() as second:
+        one, two = api.Environment(first, env.uid, context), api.Environment(second, env.uid, context)
+        history = one["company.financial.purchase.history"].browse(history_id)
+        history._lock_replacement()
+        second.execute("SET LOCAL lock_timeout = '250ms'")
+        # Native accounting, contacts, products and an unrelated purchase remain
+        # writable while one purchase follow-up holds its locks.
+        for table, record in (("account_move", data["invoice"]), ("res_partner", data["chosen_vendor"]),
+                ("product_product", history.target_order_id.order_line.product_id.id),
+                ("purchase_order", data["consolidation"]["branch_order"])):
+            second.execute('UPDATE "' + table + '" SET write_date = write_date WHERE id = %s', [record])
+        second.commit()
+        try:
+            two["company.financial.purchase.history"].browse(history_id)._lock_replacement()
+        except ConcurrencyError:
+            pass
+        else:
+            raise AssertionError("Two follow-ups for the same purchase must serialize")
+        self_action = history.action_prepare_draft()
+        assert self_action['res_id'] == data['replacement']
+        first.rollback()
+        second.rollback()
+    # Reference reservations also serialize different histories sharing a
+    # vendor reference, including a commit newer than the request's snapshot.
+    attempts = []
+    with env.registry.cursor() as first, env.registry.cursor() as second:
+        one, two = api.Environment(first, env.uid, context), api.Environment(second, env.uid, context)
+        def request():
+            attempts.append(len(attempts) + 1)
+            second.execute('SELECT txid_current_snapshot()')
+            if len(attempts) == 1:
+                h = one['company.financial.purchase.history'].browse(history_id)
+                h._claim_destination_identity(h.target_order_id.partner_id)
+                first.commit()
+            h = two['company.financial.purchase.history'].browse(history_id)
+            claim, issues = h._claim_destination_identity(h.target_order_id.partner_id)
+            assert claim and issues, 'An existing active replacement must remain blocked'
+            return 'existing replacement kept'
+        with patch('odoo.service.model.time.sleep'):
+            assert retrying(request, two) == 'existing replacement kept'
+        assert attempts == [1, 2], attempts
+    print("SURVIVAL: per-purchase locks permit unrelated writes; vendor-reference reservations survive stale-snapshot races through Odoo's real retry loop.")
+elif mode == "quarantined":
+    data = json.loads(fixture.read_text())
+    demo = env(context={**env.context, "allowed_company_ids": [data["source"], data["target"]]})
+    issues = demo['company.financial.recovery.issue'].sudo().search([('state', '=', 'pending')])
+    assert issues.archive_key == data['financial_key']
+    assert 'archived financial opening has changed' in issues.reason
+    assert not demo['company.financial.cutover'].search([('archive_key', '=', data['financial_key'])])
+    assert demo['company.financial.cutover'].sudo().search_count([('state', '=', 'done')]) == 2
+    opening = demo['account.move'].browse(data['opening'])
+    assert opening.state == 'posted' and sum(opening.line_ids.mapped('debit')) == 120
+    assert not opening.financial_cutover_id
+    assert demo['account.move'].search_count([('company_id', '=', data['target'])]) == 1
+    for key, value in data['markers'].items():
+        assert demo['ir.config_parameter'].sudo().get_param(key) == value
+    issues.action_retry()
+    assert issues.state == 'pending'
+    assert not demo['company.financial.cutover'].search([('archive_key', '=', data['financial_key'])])
+    print('SURVIVAL: reinstall succeeds, changed opening remains quarantined, healthy archives recover, retry refuses altered evidence without reposting.')
 elif mode == "approval_race":
     data = json.loads(fixture.read_text())
     context = {**env.context, "allowed_company_ids": [data["source"], data["target"]]}

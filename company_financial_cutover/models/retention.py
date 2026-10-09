@@ -1,10 +1,12 @@
 """Native attachments and markers that remain when this addon's tables go away."""
 import hashlib
 import json
+import logging
 from html import escape
 from uuid import uuid4
 
-from odoo import api, fields, models
+from psycopg2 import DataError, IntegrityError
+from odoo import SUPERUSER_ID, api, fields, models
 from odoo.exceptions import AccessError, UserError
 
 
@@ -12,6 +14,8 @@ ARCHIVE_PREFIX = "company_financial_cutover.archive."
 PURCHASE_PREFIX = "company_financial_cutover.purchase."
 DESCRIPTION_PREFIX = "FiFO-move protected archive: "
 _ARCHIVE_TOKEN = object()
+_logger = logging.getLogger(__name__)
+ISSUE_PREFIX = "company_financial_cutover.recovery_issue."
 
 BASE_FIELDS = ("source_company_id", "target_company_id", "cutover_date", "journal_id",
     "retained_earnings_account_id", "offset_account_id", "include_financial", "include_purchase_history", "include_source_branches",
@@ -50,12 +54,6 @@ class FinancialCutover(models.Model):
             self._save_durable_archive()
             return result
 
-    def action_import_purchases(self):
-        with self.env.cr.savepoint():
-            result = super().action_import_purchases()
-            self._save_durable_archive()
-            return result
-
     def _archive_payload(self):
         return {
             "version": 1, "archive_key": self.archive_key,
@@ -64,7 +62,7 @@ class FinancialCutover(models.Model):
             "accounts": [archive_values(row, ("source_account_id", "target_account_id", "handled_by_stock")) for row in self.mapping_ids],
             "contacts": [archive_values(row, ("source_partner_id", "target_partner_id", "create_contact")) for row in self.partner_mapping_ids],
             "lines": [archive_values(row, LINE_FIELDS) for row in self.line_ids],
-            "purchases": [archive_values(row, HISTORY_FIELDS) for row in self.purchase_history_ids],
+            "purchases": self._archive_purchase_rows(),
             "opening": self._opening_evidence(self.move_id) if self.move_id else False,
             "corrections": [self._opening_evidence(move) for move in self.correction_move_ids.sorted("id")],
             "earlier_openings": [self._opening_evidence(move) for move in self.prior_opening_move_ids.sorted("id")],
@@ -124,6 +122,13 @@ class FinancialCutover(models.Model):
             raise UserError("Only completed moves can be archived.")
         if not self.archive_key:
             self._system_write({"archive_key": str(uuid4())})
+        Parameter = self.env["ir.config_parameter"].sudo()
+        previous = Parameter.search([("key", "=", ARCHIVE_PREFIX + self.archive_key)])
+        if previous:
+            if Parameter.get_param(ISSUE_PREFIX + self.archive_key):
+                raise UserError("Recover this move's saved archive before updating its completion checkpoint.")
+            old_payload = self._load_durable_archive(previous)[1]
+            self._validate_archived_opening(old_payload)
         payload = self._archive_payload()
         raw = json.dumps(payload, sort_keys=True, default=str).encode()
         html = ("<!doctype html><html><meta charset='utf-8'><title>Completed company move</title><body>"
@@ -140,11 +145,11 @@ class FinancialCutover(models.Model):
         for line in self.line_ids:
             html += "<tr><td>%s</td><td>%s</td><td>%s</td></tr>" % tuple(escape(str(v)) for v in (line.label, line.balance, self.currency_id.name))
         html += "</table><h2>Purchase history</h2>"
-        for history in self.purchase_history_ids:
-            html += "<h3>%s — %s</h3><p>%s; total %s %s; replacement order %s</p>%s" % (
-                escape(history.name), escape(history.vendor_name or ""), escape(history.original_status_label),
-                history.amount_total, escape(history.currency_id.name), escape(history.target_order_id.name or "None"), history.details_html)
+        html += self._archive_purchase_report(payload["purchases"])
         html = (html + "</body></html>").encode()
+        if "company.financial.purchase.history" not in self.env and payload["purchases"] and self.report_attachment_id:
+            # Preserve the detailed purchase report when its optional UI is absent.
+            html = self.report_attachment_id.sudo().raw
         Attachment = self.env["ir.attachment"].sudo()
         for field, content, suffix, mimetype in (
             ("archive_attachment_id", raw, "recovery.json", "application/json"),
@@ -168,16 +173,7 @@ class FinancialCutover(models.Model):
             "report_id": self.report_attachment_id.id, "report_sha256": hashlib.sha256(html).hexdigest(),
             "target_company_id": self.target_company_id.id, "source_company_id": self.source_company_id.id}
         Parameter.set_param(ARCHIVE_PREFIX + self.archive_key, json.dumps(manifest, sort_keys=True))
-        for history in self.purchase_history_ids:
-            key = purchase_marker_key(history.source_company_id.id, history.source_order_res_id)
-            old = Parameter.search([("key", "=", key)])
-            if old:
-                marker = self._read_purchase_marker(old)
-                if marker["target_company_id"] != self.target_company_id.id or marker["archive_key"] != self.archive_key:
-                    raise UserError("A purchase order already has a different completed move. No duplicate copy will be created.")
-            Parameter.set_param(key, json.dumps({"version": 1, "archive_key": self.archive_key,
-                "target_company_id": self.target_company_id.id, "source_company_id": history.source_company_id.id,
-                "source_order_id": history.source_order_res_id, "target_order_id": history.target_order_id.id}, sort_keys=True))
+        self._save_purchase_markers()
 
     def _read_purchase_marker(self, parameter):
         try:
@@ -196,6 +192,9 @@ class FinancialCutover(models.Model):
             if (not raw or hashlib.sha256(raw).hexdigest() != manifest["sha256"]
                 or manifest["version"] != 1 or parameter.key != ARCHIVE_PREFIX + manifest["archive_key"]):
                 raise ValueError()
+            report = self.env["ir.attachment"].sudo().browse(manifest["report_id"]).exists()
+            if not report or hashlib.sha256(report.raw).hexdigest() != manifest["report_sha256"]:
+                raise ValueError()
             payload = json.loads(raw)
             if (payload["version"] != 1 or payload["archive_key"] != manifest["archive_key"]
                 or payload["settings"]["target_company_id"] != manifest["target_company_id"]
@@ -210,51 +209,102 @@ class FinancialCutover(models.Model):
         companies = self.env["res.company"].sudo().with_context(active_test=False).search([])
         batches = self.sudo().with_context(allowed_company_ids=companies.ids).search([("state", "=", "done")])
         for batch in batches:
-            batch._save_durable_archive()
+            if batch.archive_key and self.env['ir.config_parameter'].sudo().get_param(ISSUE_PREFIX + batch.archive_key):
+                _logger.info("Kept pending archive %s unchanged during checkpoint", batch.archive_key)
+                continue
+            try:
+                with self.env.cr.savepoint():
+                    batch._save_durable_archive()
+            except UserError as exc:
+                Parameter = self.env["ir.config_parameter"].sudo()
+                if not batch.archive_key or not Parameter.search([("key", "=", ARCHIVE_PREFIX + batch.archive_key)]):
+                    raise  # Never remove history that has no durable checkpoint.
+                # Keep old evidence rather than adopting a changed opening/copy.
+                Parameter.set_param(ISSUE_PREFIX + batch.archive_key, str(exc))
+                self.env["company.financial.recovery.issue"]._record_issue(batch.archive_key, str(exc))
+                _logger.warning("Kept original archive %s during checkpoint: %s", batch.archive_key, exc)
 
-    def _restore_archives(self):
+    def _archive_purchase_rows(self):
+        # Preserve purchase evidence when its optional addon is not installed.
+        if self.archive_key:
+            parameter = self.env["ir.config_parameter"].sudo().search([("key", "=", ARCHIVE_PREFIX + self.archive_key)])
+            if parameter:
+                return self._load_durable_archive(parameter)[1].get("purchases", [])
+        return []
+
+    def _archive_purchase_report(self, rows):
+        return "".join("<p>%s — %s; total %s. Install Company Purchase Cutover to restore the detailed history.</p>" %
+            tuple(escape(str(row.get(key, ""))) for key in ("name", "vendor_name", "amount_total")) for row in rows)
+
+    def _save_purchase_markers(self):
+        return
+
+    def _restore_purchase_rows(self, payload):
+        return
+
+    def _restore_archives(self, strict=True, archive_keys=None):
         if not self.env.is_system():
             raise AccessError("Only the administrator can restore migration archives.")
         Parameter = self.env["ir.config_parameter"].sudo()
-        for parameter in Parameter.search([("key", "=like", ARCHIVE_PREFIX + "%")], order="id"):
-            manifest, payload = self._load_durable_archive(parameter)
-            settings = payload["settings"]
-            companies = self.env["res.company"].sudo().browse(list(set((payload["audit"].get("completed_source_ids") or [settings["source_company_id"]]) + [settings["target_company_id"]]))).exists()
-            if len(companies) != len(set((payload["audit"].get("completed_source_ids") or [settings["source_company_id"]]) + [settings["target_company_id"]])):
-                raise UserError("A company referenced by a completed migration archive no longer exists. Keep its archive and ask your administrator to review recovery.")
-            Cutover = self.sudo().with_context(allowed_company_ids=companies.ids)
-            batch = Cutover.search([("archive_key", "=", payload["archive_key"])])
-            if batch:
-                continue
-            Cutover._validate_archived_opening(payload)
-            values = {key: settings[key] for key in BASE_FIELDS if key in settings}
-            if "prior_opening_move_ids" in values:
-                values["prior_opening_move_ids"] = [(6, 0, values["prior_opening_move_ids"])]
-            batch = Cutover.create(values)
-            for name, model, rows in (
-                ("accounts", "company.financial.account.mapping", payload["accounts"]),
-                ("contacts", "company.financial.partner.mapping", payload["contacts"]),
-            ):
-                for row in rows:
-                    batch.env[model].create({**row, "cutover_id": batch.id})
-            for pair in payload.get("copied_invoices", []):
-                batch.env["company.financial.copied.invoice"].create({**pair, "cutover_id": batch.id})
-            if payload["lines"]:
-                batch.env["company.financial.cutover.line"]._system_create([
-                    {**row, "cutover_id": batch.id} for row in payload["lines"]])
-            histories = batch.env["company.financial.purchase.history"]._system_create([
-                {"source_company_id": settings["source_company_id"], **row, "cutover_id": batch.id} for row in payload["purchases"]]) if payload["purchases"] else batch.purchase_history_ids
-            audit = {key: payload["audit"][key] for key in AUDIT_FIELDS if key in payload["audit"]}
-            if "correction_move_ids" in audit:
-                audit["correction_move_ids"] = [(6, 0, audit["correction_move_ids"])]
-            batch._system_write({**audit, "archive_key": payload["archive_key"],
-                "archive_attachment_id": manifest["attachment_id"], "report_attachment_id": manifest["report_id"]})
-            if batch.move_id or batch.correction_move_ids:
-                (batch.move_id | batch.correction_move_ids)._restore_financial_cutover_link(batch.id)
-            for history in histories.filtered("target_order_id"):
-                if history.target_order_id.company_id != batch.target_company_id:
-                    raise UserError("An archived replacement purchase order belongs to a different company. Ask your administrator to review recovery.")
-                history.target_order_id._restore_purchase_history_link(history.id)
+        domain = [("key", "=like", ARCHIVE_PREFIX + "%")]
+        if archive_keys is not None:
+            domain = [("key", "in", [ARCHIVE_PREFIX + key for key in archive_keys])]
+        for parameter in Parameter.search(domain, order="id"):
+            key = parameter.key[len(ARCHIVE_PREFIX):]
+            try:
+                with self.env.cr.savepoint():
+                    self._restore_one_archive(parameter)
+            except (UserError, KeyError, ValueError, TypeError, DataError, IntegrityError) as exc:
+                if strict:
+                    raise
+                reason = str(exc) if isinstance(exc, UserError) else "The archive has an invalid record structure. Restore its original copy from backup."
+                Parameter.set_param(ISSUE_PREFIX + key, reason)
+                self.env["company.financial.recovery.issue"]._record_issue(key, reason)
+                _logger.warning("Migration archive %s needs recovery: %s", key, reason)
+            else:
+                Parameter.search([("key", "=", ISSUE_PREFIX + key)]).unlink()
+                self.env["company.financial.recovery.issue"]._resolve_issue(key)
+        # Pending issues are durable too, and return after an uninstall/reinstall.
+        for issue in Parameter.search([("key", "=like", ISSUE_PREFIX + "%")]):
+            self.env["company.financial.recovery.issue"]._record_issue(issue.key[len(ISSUE_PREFIX):], issue.value)
+
+    def _restore_one_archive(self, parameter):
+        manifest, payload = self._load_durable_archive(parameter)
+        settings = payload["settings"]
+        companies = self.env["res.company"].sudo().browse(list(set((payload["audit"].get("completed_source_ids") or [settings["source_company_id"]]) + [settings["target_company_id"]]))).exists()
+        if len(companies) != len(set((payload["audit"].get("completed_source_ids") or [settings["source_company_id"]]) + [settings["target_company_id"]])):
+            raise UserError("A company referenced by a completed migration archive no longer exists. Keep its archive and ask your administrator to review recovery.")
+        all_companies = self.env["res.company"].sudo().with_context(active_test=False).search([])
+        Cutover = self.with_user(SUPERUSER_ID).with_context(allowed_company_ids=all_companies.ids)
+        batch = Cutover.search([("archive_key", "=", payload["archive_key"])])
+        Cutover._validate_archived_opening(payload)
+        if batch:
+            batch._restore_purchase_rows(payload)
+            return batch
+        values = {key: settings[key] for key in BASE_FIELDS if key in settings}
+        if "prior_opening_move_ids" in values:
+            values["prior_opening_move_ids"] = [(6, 0, values["prior_opening_move_ids"])]
+        batch = Cutover.create(values)
+        for name, model, rows in (
+            ("accounts", "company.financial.account.mapping", payload["accounts"]),
+            ("contacts", "company.financial.partner.mapping", payload["contacts"]),
+        ):
+            for row in rows:
+                batch.env[model].create({**row, "cutover_id": batch.id})
+        for pair in payload.get("copied_invoices", []):
+            batch.env["company.financial.copied.invoice"].create({**pair, "cutover_id": batch.id})
+        if payload["lines"]:
+            batch.env["company.financial.cutover.line"]._system_create([
+                {**row, "cutover_id": batch.id} for row in payload["lines"]])
+        audit = {key: payload["audit"][key] for key in AUDIT_FIELDS if key in payload["audit"]}
+        if "correction_move_ids" in audit:
+            audit["correction_move_ids"] = [(6, 0, audit["correction_move_ids"])]
+        batch._system_write({**audit, "archive_key": payload["archive_key"],
+            "archive_attachment_id": manifest["attachment_id"], "report_attachment_id": manifest["report_id"]})
+        if batch.move_id or batch.correction_move_ids:
+            (batch.move_id | batch.correction_move_ids)._restore_financial_cutover_link(batch.id)
+        batch._restore_purchase_rows(payload)
+        return batch
 
     def action_download_move_report(self):
         self.ensure_one()
@@ -262,22 +312,6 @@ class FinancialCutover(models.Model):
         if not self.report_attachment_id:
             self._save_durable_archive()
         return {"type": "ir.actions.act_url", "url": "/web/content/%s?download=1" % self.report_attachment_id.id, "target": "self"}
-
-
-class PurchaseHistory(models.Model):
-    _inherit = "company.financial.purchase.history"
-
-    def action_prepare_draft(self):
-        with self.env.cr.savepoint():
-            result = super().action_prepare_draft()
-            self.cutover_id._save_durable_archive()
-            return result
-
-    def _choose_vendor(self, vendor):
-        with self.env.cr.savepoint():
-            result = super()._choose_vendor(vendor)
-            self.cutover_id._save_durable_archive()
-            return result
 
 
 class Attachment(models.Model):

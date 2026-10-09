@@ -20,8 +20,8 @@ trap fifo_restore_test_maintenance EXIT
 fifo_test_sql "ALTER SYSTEM SET autovacuum = 'off'" >/dev/null
 fifo_test_sql 'SELECT pg_reload_conf()' >/dev/null
 FIFO_TEST_LOG="$FIFO_RUNTIME_DIR/test-$(date -u +%Y%m%dT%H%M%S)-$$.log"
-if fifo_odoo --without-demo -u company_financial_cutover --test-enable \
-    --test-tags=/company_financial_cutover --stop-after-init --no-http --http-port=18070 --max-cron-threads=0 \
+if fifo_odoo --without-demo -u company_financial_cutover -i company_purchase_cutover --test-enable \
+    --test-tags=/company_financial_cutover,/company_purchase_cutover --stop-after-init --no-http --http-port=18070 --max-cron-threads=0 \
     --logfile="$FIFO_TEST_LOG"; then
     "$FIFO_PYTHON" - "$FIFO_TEST_LOG" <<'PY'
 import pathlib, re, sys

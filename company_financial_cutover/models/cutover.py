@@ -39,7 +39,7 @@ class FinancialCutover(models.Model):
     state = fields.Selection([("draft", "Getting ready"), ("preview", "Ready to move"), ("done", "Completed")],
         default="draft", required=True, readonly=True, copy=False)
     snapshot_hash = fields.Char(readonly=True, copy=False)
-    move_id = fields.Many2one("account.move", readonly=True, copy=False, ondelete="restrict")
+    move_id = fields.Many2one("account.move", string="Opening entry", readonly=True, copy=False, ondelete="restrict")
     completed_at = fields.Datetime(readonly=True, copy=False)
     completed_by = fields.Many2one("res.users", readonly=True, copy=False)
     summary = fields.Text(readonly=True, copy=False)

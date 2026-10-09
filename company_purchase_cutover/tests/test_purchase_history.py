@@ -6,10 +6,15 @@ from odoo import Command
 from odoo.exceptions import AccessError, UserError
 from odoo.tests import tagged, new_test_user
 
-from .test_cutover import FinancialCutoverCase
+from odoo.addons.company_financial_cutover.tests.test_cutover import FinancialCutoverCase
 
 
 class PurchaseMigrationCase(FinancialCutoverCase):
+    def _batch(self):
+        batch = super()._batch()
+        batch.include_purchase_history = True
+        return batch
+
     @classmethod
     def setUpClass(cls):
         super().setUpClass()

@@ -9,6 +9,35 @@ from odoo.exceptions import UserError
 class FinancialCutover(models.Model):
     _inherit = "company.financial.cutover"
 
+    include_purchase_history = fields.Boolean(string="Purchase orders (read-only history)", default=False,
+        help="Requires the optional Company Purchase Cutover addon. Copies all orders, including historical and cancelled orders, as saved history.")
+    purchase_preview_data = fields.Json(readonly=True, copy=False)
+    purchase_preview_html = fields.Html(compute="_compute_purchase_preview", sanitize=True)
+    purchase_history_preview_ready = fields.Boolean(readonly=True, copy=False)
+    purchase_mover_available = fields.Boolean(compute="_compute_purchase_available")
+
+    def _compute_purchase_available(self):
+        for batch in self:
+            batch.purchase_mover_available = "company.financial.purchase.history" in self.env
+
+    @api.depends("purchase_preview_data")
+    def _compute_purchase_preview(self):
+        for batch in self:
+            batch.purchase_preview_html = "<p>Ask your administrator to install the optional Company Purchase Cutover addon to move purchase history.</p>"
+
+    def _invalidate_preview(self):
+        super()._invalidate_preview()
+        self._system_write({"purchase_preview_data": False, "purchase_history_preview_ready": False})
+
+    def _purchase_plan(self):
+        if self.include_purchase_history:
+            raise UserError("Install the optional Company Purchase Cutover addon to move purchase orders. Choose Financial balances to move accounting only.")
+        return []
+
+    def _purchase_contacts(self):
+        self._purchase_plan()
+        return self.env["res.partner"]
+
     include_financial = fields.Boolean(string="Financial balances and unpaid items", default=True,
         help="Create the financial opening in a fresh company. Turn this off to copy purchase history without changing accounting.")
     move_scope = fields.Selection([
@@ -16,7 +45,7 @@ class FinancialCutover(models.Model):
         ("purchase", "Purchase orders (read-only history)"),
         ("both", "Financial balances and purchase orders"),
         ("stock", "Stock (separate guided move)"),
-    ], string="Move", compute="_compute_move_scope", inverse="_inverse_move_scope", required=True,
+    ], string="Selected data", compute="_compute_move_scope", inverse="_inverse_move_scope", required=True,
         help="Choose one option. The screen shows only the setup needed for your selection.")
     move_scope_description = fields.Char(compute="_compute_scope_description")
     stock_mover_available = fields.Boolean(compute="_compute_stock_mover_available")

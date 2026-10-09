@@ -49,12 +49,7 @@ def purchase_duplicate_signature(row, identity):
 class FinancialCutover(models.Model):
     _inherit = "company.financial.cutover"
 
-    include_purchase_history = fields.Boolean(string="Purchase orders (read-only history)", default=True,
-        help="Copy all source orders, including cancelled and completed orders, as read-only history at preview time. No receipts or bills are recreated.")
-    purchase_preview_data = fields.Json(readonly=True, copy=False)
-    purchase_preview_html = fields.Html(compute="_compute_purchase_preview", sanitize=True)
     purchase_history_ids = fields.One2many("company.financial.purchase.history", "cutover_id", readonly=True, copy=False)
-    purchase_history_preview_ready = fields.Boolean(readonly=True, copy=False)
 
     def _invalidate_preview(self):
         super()._invalidate_preview()
@@ -94,7 +89,7 @@ class FinancialCutover(models.Model):
         existing = self.env["company.financial.purchase.history"].sudo().search([
             ("company_id", "=", self.target_company_id.id), ("source_company_id", "in", self._source_companies().ids),
             ("source_order_res_id", "in", orders.ids)])
-        from .retention import purchase_marker_key
+        from odoo.addons.company_financial_cutover.models.retention import purchase_marker_key
         markers = self.env["ir.config_parameter"].sudo().search([
             ("key", "in", [purchase_marker_key(order.company_id.id, order.id) for order in orders])])
         copied = set(existing.mapped("source_order_res_id"))
@@ -192,9 +187,12 @@ class FinancialCutover(models.Model):
                     else "<p>Click 2. Review selected data to see the purchase orders that will be copied.</p>")
 
     def action_apply(self):
+        if not self.include_financial:
+            return super().action_apply()
         with self.env.cr.savepoint():
             result = super().action_apply()
             self._create_purchase_history(self.purchase_preview_data or [])
+            self._save_durable_archive()
             return result
 
     def _create_purchase_history(self, rows):
@@ -230,6 +228,7 @@ class FinancialCutover(models.Model):
                 raise UserError("Purchase orders changed. Preview the missing purchase orders again.")
             self._create_purchase_history(rows)
             self._system_write({"purchase_history_preview_ready": False})
+            self._save_durable_archive()
         return True
 
 
@@ -339,9 +338,35 @@ class PurchaseHistory(models.Model):
                 note = False
             history.replacement_note = note
 
+    def _purchase_operator(self):
+        self.ensure_one()
+        self.check_access("read")
+        from odoo.addons.company_financial_cutover.models.retention import ISSUE_PREFIX
+        if self.env["ir.config_parameter"].sudo().get_param(ISSUE_PREFIX + (self.cutover_id.sudo().archive_key or "")):
+            raise UserError("This move has a saved archive needing recovery. Ask your administrator to use Company move recovery before preparing replacements.")
+        user = self.env.user
+        if not (user.has_group("purchase.group_purchase_manager") or
+                user.has_group("base.group_system") and user.has_group("account.group_account_manager")
+                and user.has_group("purchase.group_purchase_user")):
+            raise AccessError("Ask your purchase manager to prepare replacements or choose their vendors.")
+        if not {self.source_company_id.id, self.company_id.id}.issubset(set(self.env.companies.ids)):
+            raise UserError("Select this order's old company and its new company in the company switcher.")
+
+    def _lock_replacement(self):
+        # Day-to-day actions serialize only this history and its native orders.
+        # Real database serialization errors are handled by Odoo's retry loop.
+        try:
+            with self.env.cr.savepoint():
+                self.env.cr.execute("SELECT id FROM company_financial_purchase_history WHERE id = %s FOR UPDATE NOWAIT", [self.id])
+                orders = sorted(set(filter(None, [self.source_order_res_id, self.target_order_id.id])))
+                if orders:
+                    self.env.cr.execute("SELECT id FROM purchase_order WHERE id IN %s ORDER BY id FOR UPDATE NOWAIT", [tuple(orders)])
+        except LockNotAvailable:
+            raise ConcurrencyError("This purchase is being updated. Please try again.") from None
+
     def action_open_original(self):
         self.ensure_one()
-        self.cutover_id._operator()
+        self._purchase_operator()
         source = self.env["purchase.order"].browse(self.source_order_res_id).exists()
         if not source:
             raise UserError("The original order is unavailable. Ask your purchase manager to review the saved history.")
@@ -410,8 +435,8 @@ class PurchaseHistory(models.Model):
         snapshot = self.snapshot or {}
         if not snapshot.get("vendor_ref"):
             return []
-        batch = self.cutover_id
-        others = self.env["purchase.order"].with_company(batch.source_company_id).search([
+        batch = self.cutover_id.sudo()
+        others = self.env["purchase.order"].with_company(self.source_company_id).search([
             ("company_id", "=", snapshot.get("company_id", batch.source_company_id.id)), ("partner_id", "=", snapshot["vendor_id"]),
             ("state", "!=", "cancel"), ("id", "!=", self.source_order_res_id)])
         signature = purchase_duplicate_signature(snapshot, batch._identity)
@@ -431,14 +456,51 @@ class PurchaseHistory(models.Model):
         return (["An existing destination purchase order may already represent this order: %s. Review it instead of creating a duplicate." % ", ".join(candidates.mapped("name"))]
             if candidates else [])
 
+    def _claim_destination_identity(self, vendor):
+        """Serialize competing histories for the same destination vendor reference.
+
+        A durable native parameter row avoids an insert phantom in repeatable
+        read. ON CONFLICT updates that row, so a newer committed reservation
+        raises a real PostgreSQL serialization error and Odoo retries.
+        """
+        reference = self.cutover_id.sudo()._identity(self.snapshot.get("vendor_ref", ""), True)
+        if not reference:
+            return False, []
+        identity = [self.company_id.id, vendor.id, reference]
+        key = "company_financial_cutover.replacement_identity." + hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+        try:
+            with self.env.cr.savepoint():
+                self.env.cr.execute("SHOW lock_timeout")
+                old_timeout = self.env.cr.fetchone()[0]
+                self.env.cr.execute("SELECT set_config('lock_timeout', '250ms', true)")
+                self.env.cr.execute("""INSERT INTO ir_config_parameter (key, value) VALUES (%s, '{}')
+                    ON CONFLICT (key) DO UPDATE SET key = EXCLUDED.key RETURNING value""", [key])
+                saved = self.env.cr.fetchone()[0]
+                self.env.cr.execute("SELECT set_config('lock_timeout', %s, true)", [old_timeout])
+        except LockNotAvailable:
+            raise ConcurrencyError("Another replacement for this vendor reference is being prepared. Please try again.") from None
+        try:
+            marker = json.loads(saved)
+            if not isinstance(marker, dict):
+                raise ValueError()
+            if marker and (marker.get("version") != 1 or marker.get("identity") != identity or not isinstance(marker.get("target_order_id"), int)):
+                raise ValueError()
+        except (TypeError, ValueError):
+            raise UserError("A saved replacement-order marker needs recovery. Ask your administrator to restore it before preparing another draft.") from None
+        previous = self.env['purchase.order'].sudo().browse(marker.get('target_order_id')).exists() if marker else self.env['purchase.order']
+        if previous and (previous.company_id != self.company_id or previous.partner_id.id != vendor.id
+                or self.cutover_id.sudo()._identity(previous.partner_ref or "", True) != reference):
+            raise UserError("A saved replacement-order marker no longer matches its order. Ask your administrator to review it before preparing another draft.")
+        issues = (["An existing destination purchase order already uses this vendor reference. Review it instead of creating a duplicate."]
+            if previous and previous.state != 'cancel' else [])
+        return (key, identity), issues
+
     def action_prepare_draft(self):
         self.ensure_one()
-        batch = self.cutover_id
-        batch._operator()
-        if not self.env.user.has_group("purchase.group_purchase_user"):
-            raise AccessError("Purchase user access is required to prepare a draft order.")
+        self._purchase_operator()
+        batch = self.cutover_id.sudo()
         with self.env.cr.savepoint():
-            batch._lock()
+            self._lock_replacement()
             if self.target_order_id:
                 return self._open_draft()
             issues = []
@@ -459,6 +521,9 @@ class PurchaseHistory(models.Model):
             mapping = batch.partner_mapping_ids.filtered(lambda m: m.source_partner_id == vendor)
             explicit = self.replacement_vendor_id or mapping.target_partner_id
             matches = explicit or batch._contact_candidates(vendor, batch._contact_pool())
+            matches = matches.with_env(self.env)
+            if matches:
+                matches.check_access("read")
             valid_vendor = (len(matches) == 1 and matches.active
                 and matches.company_id in (self.env["res.company"], self.company_id)
                 and (explicit or batch._contact_compatible(vendor, matches)))
@@ -467,7 +532,10 @@ class PurchaseHistory(models.Model):
                 or not explicit and not batch._contact_compatible(vendor, matches)):
                 issues.append("Use Choose destination vendor to select the correct existing contact first. Name alone is not enough for automatic matching.")
             origin = "Migrated purchase %s/%s" % (self.source_company_id.id, self.source_order_res_id)
+            identity_claim = False
             if valid_vendor:
+                identity_claim, identity_issues = self._claim_destination_identity(matches)
+                issues.extend(identity_issues)
                 issues.extend(self._replacement_destination_issues(matches))
             commands, product_issues = self._draft_product_commands()
             issues.extend(product_issues)
@@ -483,14 +551,17 @@ class PurchaseHistory(models.Model):
             # History is deliberately read-only in the public ACL. Only this
             # validated operator action may save its system-managed link.
             super(PurchaseHistory, self.sudo()).write({"target_order_id": order.id})
+            if identity_claim:
+                self.env['ir.config_parameter'].sudo().set_param(identity_claim[0], json.dumps({
+                    'version': 1, 'identity': identity_claim[1], 'target_order_id': order.id}, sort_keys=True))
             return self._open_draft()
 
     def action_choose_vendor(self):
         self.ensure_one()
-        self.cutover_id._operator()
+        self._purchase_operator()
         if self.target_order_id:
             raise UserError("The replacement already exists. Review its vendor on that order.")
-        mapping = self.cutover_id.partner_mapping_ids.filtered(
+        mapping = self.cutover_id.sudo().partner_mapping_ids.filtered(
             lambda row: row.source_partner_id.id == self.snapshot["vendor_id"])
         vendor = self.replacement_vendor_id or mapping.target_partner_id
         if vendor and (not vendor.active or vendor.company_id not in (self.env["res.company"], self.company_id)):
@@ -502,9 +573,8 @@ class PurchaseHistory(models.Model):
 
     def _choose_vendor(self, vendor):
         self.ensure_one()
-        self.cutover_id._operator()
-        if not self.env.user.has_group("purchase.group_purchase_user"):
-            raise AccessError("Purchase user access is required to choose a destination vendor.")
+        self._purchase_operator()
+        self._lock_replacement()
         if self.target_order_id:
             raise UserError("The replacement already exists. Review its vendor on that order.")
         if not vendor.exists() or not vendor.active or vendor.company_id not in (self.env["res.company"], self.company_id):

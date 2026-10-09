@@ -18,17 +18,17 @@
             <form create="0" edit="0" delete="0" duplicate="0">
                 <header>
                     <button name="action_choose_vendor" type="object" string="Choose destination vendor"
-                        class="oe_highlight" groups="account.group_account_manager" invisible="replacement_step != 'vendor'"/>
+                        class="oe_highlight" groups="purchase.group_purchase_manager,base.group_system" invisible="replacement_step != 'vendor'"/>
                     <button name="action_open_original" type="object" string="Open original order"
-                        class="oe_highlight" groups="account.group_account_manager" invisible="replacement_step != 'cancel'"/>
+                        class="oe_highlight" groups="purchase.group_purchase_manager,base.group_system" invisible="replacement_step != 'cancel'"/>
                     <button name="action_prepare_draft" type="object" string="Prepare replacement draft" class="oe_highlight"
-                        groups="account.group_account_manager"
+                        groups="purchase.group_purchase_manager,base.group_system"
                         invisible="replacement_step != 'prepare'"
                         confirm="Prepare one unconfirmed draft in the new company? Review its vendor, products, prices and taxes before confirming. The original order must already be cancelled so it cannot be received or billed twice."/>
                     <button name="action_prepare_draft" type="object" string="View replacement order" class="oe_highlight"
-                        groups="account.group_account_manager" invisible="not target_order_id"/>
+                        groups="purchase.group_purchase_manager,base.group_system" invisible="not target_order_id"/>
                     <button name="action_choose_vendor" type="object" string="Change vendor"
-                        groups="account.group_account_manager" invisible="replacement_step not in ['cancel', 'prepare']"/>
+                        groups="purchase.group_purchase_manager,base.group_system" invisible="replacement_step not in ['cancel', 'prepare']"/>
                     <field name="replacement_step" invisible="True"/>
                 </header>
                 <sheet>

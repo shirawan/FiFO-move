@@ -117,7 +117,10 @@ class TestScopeAndRetention(PurchaseMigrationCase):
         self.assertEqual(original.state, "purchase")
         self.assertEqual(history.replacement_vendor_id, target)
         payload = json.loads(batch.archive_attachment_id.raw)
-        self.assertEqual(payload["purchases"][0]["replacement_vendor_id"], target.id)
+        self.assertFalse(payload["purchases"][0]["replacement_vendor_id"])
+        update = self.env["ir.config_parameter"].sudo().search([("key", "=like", "company_financial_cutover.purchase_update." + batch.archive_key + ".%")])
+        attachment = self.env["ir.attachment"].sudo().browse(json.loads(update.value)["attachment_id"])
+        self.assertEqual(json.loads(attachment.raw)["replacement_vendor_id"], target.id)
         with self.assertRaisesRegex(UserError, "active existing vendor"):
             history._choose_vendor(old)
         target.active = False
