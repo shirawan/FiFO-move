@@ -32,12 +32,22 @@ def purchase_draft_advice(snapshot, env):
         return False, env._("This order delivers directly to a customer. Ask your purchase manager to review any remaining work.")
     if not lines:
         return False, env._("This order has no product lines. Keep it as history.")
+    if purchase_history_only(snapshot):
+        return False, env._("This order was fully received and billed. Keep it as history; there is no remaining work to transfer.")
     if any(line.get("downpayment") for line in lines):
         return False, env._("This order includes a down payment. Ask your purchase manager to review any remaining work.")
     if any(not float_is_zero(line[key], precision_digits=snapshot.get("unit_decimals", 2))
             for line in lines for key in ("received", "billed")):
         return False, env._("Some quantities were already received or billed. Review the remaining quantities below with your purchase manager.")
     return True, env._("Nothing was received or billed when this history was copied. Check or choose the destination vendor first. Then cancel the original order in the old company and prepare a replacement draft here. Review the new draft's products, vendor and taxes before confirming it.")
+
+
+def purchase_history_only(snapshot):
+    lines = [line for line in snapshot.get("lines", []) if not line.get("display_type")]
+    precision = snapshot.get("unit_decimals", 2)
+    return (snapshot.get("state") == "cancel" or not lines or all(
+        line["qty"] >= 0 and float_is_zero(max(line["qty"] - line[key], 0), precision_digits=precision)
+        for line in lines for key in ("received", "billed")))
 
 
 def purchase_duplicate_signature(row, identity):
@@ -50,6 +60,14 @@ class FinancialCutover(models.Model):
     _inherit = "company.financial.cutover"
 
     purchase_history_ids = fields.One2many("company.financial.purchase.history", "cutover_id", readonly=True, copy=False)
+
+    def action_open_purchase_work(self):
+        self.ensure_one()
+        self.check_access("read")
+        action = self.env.ref("company_purchase_cutover.purchase_followup_action").read()[0]
+        action.update({"domain": [("cutover_id", "=", self.id)], "context": {
+            **self.env.context, "search_default_needs_work": 1}})
+        return action
 
     def _invalidate_preview(self):
         super()._invalidate_preview()
@@ -164,12 +182,20 @@ class FinancialCutover(models.Model):
                 "account_fiscal_position", "account_fiscal_position_account_tax_rel", "product_supplier_taxes_rel")
         return tables
 
-    def action_preview(self):
-        result = super().action_preview()
+    def _has_move_role(self):
+        if self.include_purchase_history and not self.include_financial:
+            return self.env.user.has_group("purchase.group_purchase_manager") or (
+                super()._has_move_role() and self.env.user.has_group("purchase.group_purchase_user"))
+        return super()._has_move_role() and (
+            not self.include_purchase_history or self.env.user.has_group("purchase.group_purchase_user"))
+
+    def _store_preview(self, plan):
+        super()._store_preview(plan)
+        if self.state != "preview":
+            return
         purchases = self._purchase_plan()
         self._system_write({"purchase_preview_data": purchases,
             "summary": (self.summary or "") + "\nPurchase orders: %s will be copied as read-only history; receipts and bills are not recreated." % len(purchases)})
-        return result
 
     @api.depends("purchase_preview_data")
     def _compute_purchase_preview(self):
@@ -184,7 +210,7 @@ class FinancialCutover(models.Model):
                 "<div class='table-responsive'><table class='table table-sm'><thead><tr><th scope='col'>Old company</th><th scope='col'>Order</th><th scope='col'>Vendor</th><th scope='col'>Original status</th><th scope='col'>Lines</th><th scope='col'>Order total</th>"
                 "</tr></thead><tbody>" + body + "</tbody></table></div>") if rows else (
                     "<p>No new purchase orders to copy. Already copied orders are skipped; earlier copies remain under Purchase → Migrated purchase history.</p>" if batch.purchase_preview_data is not False
-                    else "<p>Click 2. Review selected data to see the purchase orders that will be copied.</p>")
+                    else "<p>Click Review my move to see the purchase orders that will be copied.</p>")
 
     def action_apply(self):
         if not self.include_financial:
@@ -261,12 +287,39 @@ class PurchaseHistory(models.Model):
         compute="_compute_replacement_step")
     current_original_status = fields.Char(string="Current status in the old company", compute="_compute_replacement_step")
     replacement_note = fields.Char(compute="_compute_replacement_step")
+    followup_required = fields.Boolean(compute="_compute_followup_required", store=True,
+        string="Remaining work")
+    can_manage_replacement = fields.Boolean(compute="_compute_can_manage_replacement")
     replacement_step = fields.Selection([
         ("vendor", "Choose a vendor"), ("cancel", "Cancel the original"),
         ("prepare", "Prepare a draft"), ("created", "View the replacement"),
         ("manual", "Manager review needed"),
+        ("history", "History only"),
     ], compute="_compute_replacement_step")
     _unique_order = models.Constraint("UNIQUE(company_id, source_company_id, source_order_res_id)", "This purchase order already has migrated history in the new company.")
+
+    @api.depends("snapshot", "target_order_id")
+    def _compute_followup_required(self):
+        for history in self:
+            history.followup_required = not history.target_order_id and not purchase_history_only(history.snapshot or {})
+
+    def _has_purchase_role(self):
+        user = self.env.user
+        return (user.has_group("purchase.group_purchase_manager") or
+            user.has_group("base.group_system") and user.has_group("account.group_account_manager")
+            and user.has_group("purchase.group_purchase_user"))
+
+    @api.depends_context("uid", "allowed_company_ids")
+    @api.depends("source_company_id", "company_id")
+    def _compute_can_manage_replacement(self):
+        for history in self:
+            history.can_manage_replacement = bool(history._has_purchase_role()
+                and {history.source_company_id.id, history.company_id.id}.issubset(set(self.env.companies.ids)))
+
+    def action_refresh_status(self):
+        self.check_access("read")
+        self.invalidate_recordset()
+        return {"type": "ir.actions.client", "tag": "reload"}
 
     @api.depends("original_state", "snapshot", "target_order_id")
     def _compute_order_guidance(self):
@@ -315,6 +368,8 @@ class PurchaseHistory(models.Model):
                 draft_issues.extend(history._replacement_destination_issues(vendor))
             if history.target_order_id:
                 step = "created"
+            elif purchase_history_only(history.snapshot or {}):
+                step = "history"
             elif not eligible or not source or not unchanged or draft_issues:
                 step = "manual"
             elif not vendor or not vendor.active or vendor.company_id not in (self.env["res.company"], history.company_id):
@@ -344,10 +399,7 @@ class PurchaseHistory(models.Model):
         from odoo.addons.company_financial_cutover.models.retention import ISSUE_PREFIX
         if self.env["ir.config_parameter"].sudo().get_param(ISSUE_PREFIX + (self.cutover_id.sudo().archive_key or "")):
             raise UserError("This move has a saved archive needing recovery. Ask your administrator to use Company move recovery before preparing replacements.")
-        user = self.env.user
-        if not (user.has_group("purchase.group_purchase_manager") or
-                user.has_group("base.group_system") and user.has_group("account.group_account_manager")
-                and user.has_group("purchase.group_purchase_user")):
+        if not self._has_purchase_role():
             raise AccessError("Ask your purchase manager to prepare replacements or choose their vendors.")
         if not {self.source_company_id.id, self.company_id.id}.issubset(set(self.env.companies.ids)):
             raise UserError("Select this order's old company and its new company in the company switcher.")

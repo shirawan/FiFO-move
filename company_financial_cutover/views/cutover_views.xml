@@ -19,46 +19,43 @@
         <field name="arch" type="xml">
             <form duplicate="0">
                 <header>
+                    <button name="action_review" type="object" string="Review my move" class="oe_highlight" invisible="move_scope == 'stock' or state != 'draft' or not can_run_move or (include_purchase_history and not purchase_mover_available)"/>
+                    <field name="can_run_move" invisible="True"/>
                     <button name="action_open_stock_mover" type="object" string="Open stock mover" class="oe_highlight" invisible="move_scope != 'stock' or not stock_mover_available"/>
-                    <button name="action_match" type="object" string="1. Check existing data" class="oe_highlight" invisible="move_scope == 'stock' or state != 'draft' or check_status == 'ready'"/>
-                    <button name="action_preview" type="object" string="2. Review selected data" class="oe_highlight" invisible="move_scope == 'stock' or state != 'draft' or check_status != 'ready'"/>
-                    <button name="action_apply" type="object" string="3. Move selected data" class="oe_highlight" invisible="not include_financial or state != 'preview'" confirm="Move the reviewed balances and any selected purchase history to the new company? Have your administrator verify the backup and pause accounting and purchase activity first. Any selected earlier opening entries will receive posted reversals. Stock moves separately."/>
-                    <button name="action_apply" type="object" string="3. Copy purchase history" class="oe_highlight" invisible="include_financial or not include_purchase_history or state != 'preview'" confirm="Copy the reviewed purchase orders as saved history? This creates no active orders, receipts or bills. Existing copies are skipped. Have your administrator verify the backup and pause activity first."/>
-                    <button name="action_open_entry" type="object" string="View opening entry" class="oe_highlight" invisible="state != 'done' or not move_id"/>
-                    <button name="action_download_move_report" type="object" string="Download completed report" invisible="state != 'done'"/>
-                    <button name="action_match" type="object" string="Check again" invisible="move_scope == 'stock' or state == 'done' or (state == 'draft' and check_status != 'ready')"/>
-                    <button name="action_preview" type="object" string="Refresh review" invisible="move_scope == 'stock' or state != 'preview'"/>
+                    <button name="action_apply" type="object" string="Confirm move" class="oe_highlight" invisible="not include_financial or state != 'preview' or not can_run_move" confirm="Move the reviewed balances and any selected purchase history to the new company? Have your administrator verify the backup and pause accounting and purchase activity first. Any selected earlier opening entries will receive posted reversals. Stock moves separately."/>
+                    <button name="action_apply" type="object" string="Confirm history copy" class="oe_highlight" invisible="include_financial or not include_purchase_history or state != 'preview' or not can_run_move" confirm="Copy the reviewed purchase orders as saved history? This creates no active orders, receipts or bills. Existing copies are skipped. Have your administrator verify the backup and pause activity first."/>
+                    <field name="can_view_entry" invisible="True"/>
+                    <field name="can_download_report" invisible="True"/>
+                    <button name="action_open_entry" type="object" string="View opening entry" class="oe_highlight" invisible="state != 'done' or not can_view_entry"/>
+                    <button name="action_download_move_report" type="object" string="Download completed report" invisible="state != 'done' or not can_download_report"/>
                     <field name="purchase_history_preview_ready" invisible="True"/>
                     <field name="check_status" invisible="True"/>
                     <field name="state" widget="statusbar" statusbar_visible="draft,preview,done" invisible="move_scope == 'stock'"/>
+                    <button name="action_review" type="object" string="Update review" invisible="move_scope == 'stock' or state != 'preview' or not can_run_move"/>
                 </header>
                 <sheet>
                     <h1>Move to a new company</h1>
-                    <div class="text-muted mb-3">Choose what you want to move below. The screen adapts to your selection.</div>
+                    <div class="text-muted mb-3" invisible="state == 'done'">Choose the companies and data, review the result, then confirm.</div>
+                    <div class="alert alert-info" role="status" invisible="move_scope == 'stock' or state != 'draft' or check_status not in ['unchecked', 'ready']">
+                        <strong>Choose, then review.</strong>
+                        <p class="mb-0">Review my move checks existing data and shows what will change. Nothing is moved during review.</p>
+                    </div>
+                    <div class="alert alert-success" role="status" invisible="check_status != 'up_to_date'">
+                        <strong>Already up to date.</strong>
+                        <p class="mb-0">No new purchase history to copy. Existing copies are kept; nothing was created.</p>
+                    </div>
+                    <div class="alert alert-info" role="status" invisible="state != 'preview'">
+                        <strong>Review, then confirm.</strong>
+                        <p class="mb-0">Check the scope and amounts below with your accountant, or your purchase manager for history only. Before confirming, verify the backup and pause activity for the maintenance window.</p>
+                    </div>
+                    <div class="alert alert-info" role="status" invisible="can_run_move or state == 'done'">
+                        <strong>An authorized operator is needed.</strong>
+                        <p class="mb-0">Enable the old company, its included branches and the new company. Financial and stock moves require Settings and Accounting administrator rights. Including purchase history also needs Purchase user access; a Purchase manager can copy history alone.</p>
+                    </div>
                     <div class="alert alert-info" role="status" invisible="move_scope != 'stock'">
                         <strong>Stock has its own guided move.</strong>
                         <p class="mb-0" invisible="not stock_mover_available">Choose the old and new companies, then click Open stock mover to choose warehouses and review quantities and values.</p>
                         <p class="mb-0" invisible="stock_mover_available">Ask your Odoo administrator to install Company Stock Cutover and its dependencies. Then choose the old and new companies and open the stock mover.</p>
-                    </div>
-                    <div class="alert alert-info" role="status" invisible="move_scope == 'stock' or state != 'draft' or check_status != 'unchecked'">
-                        <strong>Step 1 of 3: Choose the companies and check existing data.</strong>
-                        <p class="mb-0" invisible="not include_financial">Choose the old and new companies and enter the balance date. Then click 1. Check existing data. Checking does not move data.</p>
-                        <p class="mb-0" invisible="include_financial">Choose the old and new companies, then click 1. Check existing data. Checking does not copy or change any orders.</p>
-                    </div>
-                    <div class="alert alert-warning" role="status" invisible="state != 'draft' or check_status != 'blocked'">
-                        <strong>This move needs attention before you can continue.</strong>
-                        <p class="mb-0">Read Check results below and ask your accountant or purchase manager to resolve the listed issues. Then click 1. Check existing data again.</p>
-                    </div>
-                    <div class="alert alert-success" role="status" invisible="state != 'draft' or check_status != 'ready'">
-                        <strong>Step 2 of 3: Your checks passed. Review what will move.</strong>
-                        <p class="mb-0">Click 2. Review selected data. You can still change your choices; nothing has moved yet.</p>
-                    </div>
-                    <div class="alert alert-info" role="status" invisible="state != 'preview'">
-                        <strong invisible="not include_financial">Step 3 of 3: Get approval, then move the selected data.</strong>
-                        <strong invisible="include_financial">Step 3 of 3: Approve the purchase history copy.</strong>
-                        <p invisible="not include_financial">Ask your accountant to approve the financial amounts and your purchase manager to review any included orders.</p>
-                        <p invisible="include_financial">Ask your purchase manager to check the orders below. This copies history; active orders are prepared separately afterwards.</p>
-                        <p class="mb-0">Have your Odoo administrator verify the backup and pause accounting and purchase activity before continuing. Nothing has moved yet.</p>
                     </div>
                     <div class="alert alert-success" role="status" invisible="state != 'done' or not include_financial">
                         <strong>Completed: the financial opening is in the new company.</strong>
@@ -68,21 +65,21 @@
                         <strong>Completed: purchase history was copied to the new company.</strong>
                         <p class="mb-0">Financial balances were not changed. Open Purchase orders below to review the copied history and any remaining work.</p>
                     </div>
-                    <group string="What do you want to move?">
+                    <group string="What do you want to move?" invisible="state == 'done'">
                         <field name="move_scope" readonly="state == 'done'"/>
                         <field name="include_financial" invisible="True"/>
                         <field name="include_purchase_history" invisible="True"/>
                     </group>
                     <field name="purchase_mover_available" invisible="True"/>
                     <div class="alert alert-info" role="status" invisible="purchase_mover_available or not include_purchase_history">Purchase history needs the optional Company Purchase Cutover addon. Ask your administrator to install it, or select Financial balances.</div>
-                    <field name="move_scope_description" nolabel="1" class="text-muted mb-3"/>
+                    <field name="move_scope_description" nolabel="1" class="text-muted mb-3" invisible="state == 'done'"/>
                     <group string="Your move">
                         <group>
                             <field name="source_company_id" readonly="state == 'done'" options="{'no_create': True, 'no_open': True}"/>
-                            <field name="include_source_branches" readonly="state == 'done'" invisible="move_scope == 'stock'"/>
-                            <field name="source_scope_description" nolabel="1" colspan="2" invisible="move_scope == 'stock'"/>
+                            <field name="include_source_branches" readonly="state == 'done'" invisible="True"/>
+                            <field name="source_scope_description" nolabel="1" colspan="2" invisible="move_scope == 'stock'" class="fw-bold"/>
                             <field name="target_company_id" readonly="state == 'done'" options="{'no_create': True, 'no_open': True}"/>
-                            <field name="destination_mode" readonly="state == 'done'" invisible="not include_financial"/>
+                            <field name="destination_mode" readonly="True" invisible="not include_financial" string="Existing accounting"/>
                             <field name="cutover_date" readonly="state == 'done'" invisible="not include_financial"/>
                         </group>
                         <group>
@@ -92,7 +89,7 @@
                     </group>
                     <p class="text-muted" invisible="state == 'done' or not include_financial">Balances include posted items dated on or before the balance date.</p>
                     <p class="text-muted" invisible="state == 'done' or not include_purchase_history">Purchase history includes all orders at review time. Already copied orders are skipped.</p>
-                    <div class="mb-3" name="existing_data_review" invisible="not include_financial or destination_mode != 'existing'">
+                    <div class="mb-3" name="existing_data_review" invisible="not include_financial or destination_mode != 'existing' or state != 'draft'">
                         <separator string="Existing data — review with your accountant"/>
                         <p>New trading activity stays in the new company. Identify only data that was already transferred from the old company.</p>
                         <p>Select earlier opening journal entries below. They remain available and receive opposite entries on the balance date before the complete opening is carried over. Related unpaid items are matched so they are not owed twice.</p>
@@ -110,7 +107,7 @@
                                 <field name="schedule_differs" column_invisible="True"/>
                             </list>
                         </field>
-                        <p class="text-muted">Payment schedules show original installments before payments. Differences appear together in Check results. Confirm intended changes with your accountant; the new copy keeps its due dates and existing payments.</p>
+                        <p class="text-muted">Payment schedules show original installments before payments. Differences appear together in Review information. Confirm intended changes with your accountant; the new copy keeps its due dates and existing payments.</p>
                         <group>
                             <field name="existing_data_reviewed" readonly="state == 'done'"/>
                         </group>
@@ -119,61 +116,67 @@
                             <field name="correction_move_ids" widget="many2many_tags"/>
                         </group>
                     </div>
-                    <details class="mb-3" invisible="move_scope == 'stock'">
+                    <details class="mb-3" invisible="move_scope == 'stock' or state == 'done'">
                         <summary>What moves, and what stays in the old company?</summary>
                         <p invisible="not include_financial">Financial balances and individual unpaid customer/vendor items become an opening entry in the new company.</p>
                         <p invisible="not include_purchase_history">Purchase orders become saved history. No active order, receipt or bill is created by copying history. Eligible orders can be prepared as replacement drafts later.</p>
                         <p>Past invoices, bills, payments and tax reports stay available in the old company. Company settings are not copied.</p>
                         <p invisible="not include_financial">Finish bank reconciliation in the old company first. If you are also moving stock, move financial balances first and use the same stock clearing account in both tools.</p>
                     </details>
-                    <div class="mb-3" name="move_check_results" invisible="not check_report">
-                        <separator string="Check results"/>
-                        <field name="check_status" widget="badge" nolabel="1" invisible="state == 'done'"/>
-                        <field name="check_report" nolabel="1"/>
+                    <div name="move_check_results" class="mb-3" invisible="state == 'done'">
+                        <div class="alert alert-warning" role="status" invisible="not decisions_text">
+                            <strong>Decisions needed before this move</strong>
+                            <p>Resolve the listed items together, then click Review my move. You can select purchase history only while financial work is being prepared.</p>
+                            <field name="decisions_text" nolabel="1"/>
+                        </div>
+                        <details invisible="not information_text">
+                            <summary>Review information</summary>
+                            <field name="information_text" nolabel="1"/>
+                        </details>
                     </div>
                     <div invisible="state == 'draft'" class="mb-3">
-                        <separator string="Review selected data"/>
-                        <p invisible="not include_financial">Ask your accountant to check these amounts against the old company's balances and unpaid items. Inventory marked for the stock move is listed here but is handled separately.</p>
+                        <separator string="Result"/>
+                        <p invisible="not include_financial or state == 'done'">Ask your accountant to check these amounts against the old company's balances and unpaid items. Inventory marked for the stock move is listed here but is handled separately.</p>
                         <field name="summary" string="Review summary" invisible="not summary"/>
                         <field name="destination_balance_html" nolabel="1" invisible="not include_financial or destination_mode != 'existing'"/>
-                        <field name="line_ids" nolabel="1" invisible="not include_financial">
-                            <list create="0" edit="0" delete="0">
-                                <field name="sequence" column_invisible="True"/>
-                                <field name="company_currency_id" column_invisible="True"/>
-                                <field name="kind" string="What is moving"/>
-                                <field name="label" string="Description"/>
-                                <field name="target_account_id" string="New company account"/>
-                                <field name="balance" string="Opening amount (+ / −)"/>
-                                <field name="source_partner_id" string="Customer or vendor" optional="show"/>
-                                <field name="date_maturity" string="Payment due" optional="show"/>
-                                <field name="source_date" string="Original date" optional="hide"/>
-                                <field name="source_account_id" string="Old company account" optional="hide"/>
-                                <field name="target_partner_id" string="New company contact" optional="hide"/>
-                                <field name="currency_id" string="Item currency" optional="hide"/>
-                                <field name="amount_currency" string="Amount in item currency" optional="hide"/>
-                                <field name="source_line_id" optional="hide"/>
-                                <field name="posted_line_id" string="Created opening item" optional="hide"/>
-                            </list>
-                        </field>
-                        <field name="purchase_preview_html" nolabel="1" invisible="not include_purchase_history or state == 'done'"/>
+                        <details invisible="not include_purchase_history or state == 'done'">
+                            <summary>View purchase history to copy</summary>
+                            <field name="purchase_preview_html" nolabel="1" invisible="not include_purchase_history or state == 'done'"/>
+                        </details>
+                        <details invisible="not include_financial">
+                            <summary>View financial items</summary>
+                            <field name="line_ids" nolabel="1" invisible="not include_financial">
+                                <list create="0" edit="0" delete="0">
+                                    <field name="sequence" column_invisible="True"/>
+                                    <field name="company_currency_id" column_invisible="True"/>
+                                    <field name="kind" string="What is moving"/>
+                                    <field name="label" string="Description"/>
+                                    <field name="target_account_id" string="New company account"/>
+                                    <field name="balance" string="Opening amount (+ / −)"/>
+                                    <field name="source_partner_id" string="Customer or vendor" optional="show"/>
+                                    <field name="date_maturity" string="Payment due" optional="show"/>
+                                    <field name="source_date" string="Original date" optional="hide"/>
+                                    <field name="source_account_id" string="Old company account" optional="hide"/>
+                                    <field name="target_partner_id" string="New company contact" optional="hide"/>
+                                    <field name="currency_id" string="Item currency" optional="hide"/>
+                                    <field name="amount_currency" string="Amount in item currency" optional="hide"/>
+                                    <field name="source_line_id" optional="hide"/>
+                                    <field name="posted_line_id" string="Created opening item" optional="hide"/>
+                                </list>
+                            </field>
+                        </details>
                     </div>
                     <notebook>
-                        <page string="Review matches" name="matching_choices" invisible="not include_financial and not include_purchase_history">
-                            <separator string="Accounts" invisible="not include_financial"/>
-                            <p invisible="not include_financial">Check existing data fills clear matches. Ask your accountant to choose a new company account wherever a choice is missing. Tick Handled by stock move only for inventory being moved by the stock tool.</p>
-                            <field name="mapping_ids" nolabel="1" readonly="state == 'done'" invisible="not include_financial">
+                        <page name="matching_choices" string="Choices to resolve" invisible="not include_financial or state == 'done' or (not unresolved_mapping_ids and not unresolved_partner_mapping_ids)">
+                            <p>Choose missing accounts and ambiguous financial contacts here. Purchase vendors can be chosen later, when preparing replacement orders.</p>
+                            <field name="unresolved_mapping_ids" nolabel="1" readonly="state == 'done'" invisible="not include_financial or not unresolved_mapping_ids">
                                 <list editable="bottom" create="0" delete="0" decoration-warning="not target_account_id and not handled_by_stock">
                                     <field name="source_account_id" string="Old company account" readonly="1" options="{'no_create': True}" context="{'allowed_company_ids': [parent.source_company_id]}"/>
                                     <field name="target_account_id" string="Use this new company account" options="{'no_create': True}" context="{'allowed_company_ids': [parent.target_company_id]}" domain="[('company_ids', 'in', [parent.target_company_id])]"/>
                                     <field name="handled_by_stock" string="Handled by stock move"/>
                                 </list>
                             </field>
-                            <separator string="Customers and vendors" invisible="not include_financial"/>
-                            <separator string="Vendors for replacement orders" invisible="include_financial"/>
-                            <p>Clear matches are reused. For a name-only match, choose the correct existing contact yourself.</p>
-                            <p invisible="not include_financial">Create a new contact is suggested only when no possible match exists, including archived contacts. Do not tick it to bypass a missing choice.</p>
-                            <p invisible="not include_purchase_history">Before cancelling an original purchase order, choose its destination vendor. After copying history, you can also use Choose destination vendor from that order's saved history. Missing vendors must be created or reactivated in Contacts first.</p>
-                            <field name="partner_mapping_ids" nolabel="1" readonly="state == 'done'">
+                            <field name="unresolved_partner_mapping_ids" nolabel="1" readonly="state == 'done'" invisible="not unresolved_partner_mapping_ids">
                                 <list editable="bottom" create="0" delete="0" decoration-warning="not target_partner_id and not create_contact">
                                     <field name="source_partner_id" string="Old company contact" readonly="1" options="{'no_create': True}"/>
                                     <field name="target_partner_id" string="Use this existing contact" options="{'no_create': True}" domain="[('company_id', 'in', [False, parent.target_company_id])]"/>
@@ -181,16 +184,23 @@
                                 </list>
                             </field>
                         </page>
-                        <page string="Accountant setup" name="accountant_setup" invisible="not include_financial">
-                            <p>Your accountant completes these choices before you check existing data. Existing accounts are reused.</p>
-                            <group>
-                                <field name="journal_id" readonly="state == 'done'" options="{'no_create': True}" domain="[('company_id', '=', target_company_id), ('type', '=', 'general')]"/>
-                                <field name="retained_earnings_account_id" readonly="state == 'done'" options="{'no_create': True}" context="{'allowed_company_ids': [target_company_id]}" domain="[('company_ids', 'in', [target_company_id]), ('account_type', 'in', ['equity', 'equity_unaffected'])]"/>
-                                <field name="offset_account_id" readonly="state == 'done'" options="{'no_create': True}" context="{'allowed_company_ids': [target_company_id]}" domain="[('company_ids', 'in', [target_company_id]), ('account_type', '=', 'asset_current')]"/>
-                                <button name="action_prepare_stock_clearing" type="object" string="Connect the stock move" invisible="state == 'done'"/>
-                            </group>
+                        <page string="Accountant setup" name="accountant_setup" invisible="not include_financial or state == 'done'">
+                            <details>
+                                <summary>Accountant settings</summary>
+                                <p>Suggested settings are filled automatically. Your accountant checks or completes the choices needed for this opening.</p>
+                                <group>
+                                    <field name="journal_id" readonly="state == 'done'" options="{'no_create': True}" domain="[('company_id', '=', target_company_id), ('type', '=', 'general')]"/>
+                                    <field name="retained_earnings_account_id" readonly="state == 'done'" options="{'no_create': True}" context="{'allowed_company_ids': [target_company_id]}" domain="[('company_ids', 'in', [target_company_id]), ('account_type', 'in', ['equity', 'equity_unaffected'])]"/>
+                                    <field name="offset_account_id" readonly="state == 'done'" options="{'no_create': True}" context="{'allowed_company_ids': [target_company_id]}" domain="[('company_ids', 'in', [target_company_id]), ('account_type', '=', 'asset_current')]"/>
+                                    <button name="action_prepare_stock_clearing" type="object" string="Connect the stock move" invisible="state == 'done'"/>
+                                </group>
+                            </details>
                         </page>
-                        <page string="Completed move" name="completed_move" invisible="state != 'done'">
+                        <page string="Move receipt" name="completed_move" invisible="state != 'done'">
+                            <group>
+                                <field name="move_scope" readonly="True"/>
+                                <field name="correction_move_ids" widget="many2many_tags" invisible="not correction_move_ids"/>
+                            </group>
                             <group>
                                 <field name="move_id" string="Opening entry"/>
                                 <field name="completed_at" string="Completed on"/>
@@ -201,18 +211,49 @@
                                 <field name="snapshot_hash" string="Review fingerprint"/>
                             </details>
                         </page>
+                        <page string="Move details" name="move_details" invisible="not include_financial or check_status == 'unchecked'">
+                            <p invisible="state == 'done'">Clear matches are reused. Review or change a match here if needed; changing a choice requires a fresh review.</p>
+                            <details>
+                                <summary>All account matches</summary>
+                                <field name="mapping_ids" nolabel="1" readonly="state == 'done'" invisible="not include_financial">
+                                    <list editable="bottom" create="0" delete="0" decoration-warning="not target_account_id and not handled_by_stock">
+                                        <field name="source_account_id" string="Old company account" readonly="1" options="{'no_create': True}" context="{'allowed_company_ids': [parent.source_company_id]}"/>
+                                        <field name="target_account_id" string="Use this new company account" options="{'no_create': True}" context="{'allowed_company_ids': [parent.target_company_id]}" domain="[('company_ids', 'in', [parent.target_company_id])]"/>
+                                        <field name="handled_by_stock" string="Handled by stock move"/>
+                                    </list>
+                                </field>
+                            </details>
+                            <details>
+                                <summary>All contact matches</summary>
+                                <field name="partner_mapping_ids" nolabel="1" readonly="state == 'done'">
+                                    <list editable="bottom" create="0" delete="0" decoration-warning="not target_partner_id and not create_contact">
+                                        <field name="source_partner_id" string="Old company contact" readonly="1" options="{'no_create': True}"/>
+                                        <field name="target_partner_id" string="Use this existing contact" options="{'no_create': True}" domain="[('company_id', 'in', [False, parent.target_company_id])]"/>
+                                        <field name="create_contact" column_invisible="not parent.include_financial"/>
+                                    </list>
+                                </field>
+                            </details>
+                            <details invisible="state == 'draft' or destination_mode != 'existing'">
+                                <summary>Previously transferred data</summary>
+                                <field name="prior_opening_move_ids" widget="many2many_tags" readonly="state == 'done'"/>
+                                <field name="copied_invoice_ids" readonly="state == 'done'">
+                                    <list create="0" edit="0" delete="0">
+                                        <field name="source_move_id"/>
+                                        <field name="target_move_id"/>
+                                    </list>
+                                </field>
+                            </details>
+                        </page>
                     </notebook>
-                    <div class="mb-3" invisible="move_scope == 'stock'">
-                        <separator string="Stock and other modules"/>
+                    <div class="mb-3" invisible="move_scope == 'stock' or not stock_mover_available">
+                        <separator string="Move opening stock"/>
                         <field name="stock_mover_available" invisible="True"/>
-                        <p>Stock moves separately so you can review warehouses, quantities and values. If you also chose financial balances, complete that move first. Sales, manufacturing and other historical documents remain in the old company.</p>
-                        <button name="action_open_stock_mover" type="object" string="Open stock mover" invisible="move_scope == 'stock' or not stock_mover_available or (include_financial and state != 'done')"/>
+                        <p>Stock has its own warehouse review. Complete the financial opening first if you are moving both.</p>
+                        <button name="action_open_stock_mover" type="object" string="Move opening stock" invisible="move_scope == 'stock' or not stock_mover_available or (include_financial and state != 'done')"/>
                         <p class="text-muted" invisible="stock_mover_available">Stock moves require Company Stock Cutover and its dependencies. Ask your Odoo administrator to install them to enable this option.</p>
                     </div>
-                    <div class="alert alert-info" role="status" invisible="state != 'done'">
-                        <strong>Your completed records stay in Odoo if this addon is uninstalled.</strong>
-                        <p class="mb-0">Accounting entries and prepared purchase orders remain. The saved history screens return when this addon is reinstalled. Download the completed report to keep your own readable copy.</p>
-                    </div>
+                    <p class="text-muted" invisible="state != 'done' or can_download_report">Ask the operator who ran this move or an administrator for the saved report.</p>
+                    <div invisible="state != 'done'" class="text-muted mt-3">Completed entries and prepared orders remain in Odoo if the addon is removed. Keep the completed report for your records.</div>
                 </sheet>
             </form>
         </field>
@@ -223,7 +264,7 @@
         <field name="view_mode">list,form</field>
         <field name="help" type="html">
             <p class="o_view_nocontent_smiling_face">Choose what to move to your new company</p>
-            <p>Choose financial balances, purchase orders, or both. Check existing data, review the selected data, then confirm. Stock has a separate guided move.</p>
+            <p>Choose financial balances, purchase history, or both. Review my move checks existing data and prepares the review; confirm when approved. Stock has a separate guided move.</p>
         </field>
     </record>
     <menuitem id="financial_cutover_menu" name="Move Company Data" parent="account.menu_finance_configuration" action="financial_cutover_action" groups="account.group_account_manager" sequence="95"/>

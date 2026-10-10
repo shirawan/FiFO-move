@@ -119,45 +119,62 @@ class FinancialCutover(models.Model):
             return rows, hashlib.sha256(json.dumps([digest, True]).encode()).hexdigest(), count
         self._validate_purchase_only()
         purchases = self._purchase_plan()
-        if not purchases:
-            raise UserError("There are no new purchase orders to copy. Existing copies are skipped, so no duplicate history will be created.")
         evidence = [False, self.include_purchase_history, self.source_company_id.id,
             self.target_company_id.id, self._scope_evidence(), purchases]
         return [], hashlib.sha256(json.dumps(evidence, sort_keys=True, default=str).encode()).hexdigest(), 0
 
-    def _check_purchase_only(self):
+    def _check_purchase_only(self, build_preview=False):
         report = ["Purchase orders only: financial balances, invoices, bills and stock will not be changed."]
         try:
             self._validate_purchase_only()
-            self._match_contacts(self._purchase_contacts())
-            self._plan()
+            vendors = self._purchase_contacts()
+            self._match_contacts(vendors)
+            plan = self._plan()
         except UserError as exc:
             status = "blocked"
             report.append("Needs attention: %s" % exc)
         else:
             status = "ready"
             report.append("Purchase checks passed. Already copied orders are skipped.")
-            missing = self.partner_mapping_ids.filtered(lambda row: not row.target_partner_id)
+            missing = self.partner_mapping_ids.filtered(lambda row: row.source_partner_id in vendors and not row.target_partner_id)
             if missing:
-                report.append("Vendors needing a choice: %s. Choose them under Review matches before cancelling original orders. "
-                    "You can copy the history now and choose vendors from the saved history later." % len(missing))
+                report.append("Vendors needing a choice: %s. History can be copied now. Choose these vendors from "
+                    "the saved history when preparing replacement orders, before cancelling their originals." % len(missing))
         notices = self._review_notices(self.env["account.move.line"])
         if notices:
             report.append("For review — these notices do not block copying:\n" + "\n".join("• " + note for note in notices))
         self._system_write({"check_status": status, "check_report": "\n\n".join(report)})
+        if status == "ready" and build_preview:
+            self._store_preview(plan)
+        elif status == "ready" and not self._purchase_plan():
+            self._mark_up_to_date()
         return True
 
     def action_preview(self):
         if self.include_financial:
             return super().action_preview()
         self.ensure_one()
-        _rows, digest, _count = self._plan()
+        self._operator()
+        self._store_preview(self._plan())
+        return True
+
+    def _mark_up_to_date(self):
+        self._system_write({"state": "draft", "check_status": "up_to_date",
+            "check_report": "Already up to date — no new purchase history to copy. Existing copies are kept; nothing was created.",
+            "snapshot_hash": False, "purchase_preview_data": [], "summary": False})
+
+    def _store_preview(self, plan):
+        if self.include_financial:
+            return super()._store_preview(plan)
+        _rows, digest, _count = plan
         purchases = self._purchase_plan()
+        if not purchases:
+            self._mark_up_to_date()
+            return
         self.line_ids._system_unlink()
         self._system_write({"state": "preview", "snapshot_hash": digest,
             "purchase_preview_data": purchases,
             "summary": "%s new purchase orders will be copied as read-only history. Financial balances, receipts and bills will not be created. Already copied orders are skipped." % len(purchases)})
-        return True
 
     def action_apply(self):
         if self.include_financial:
@@ -171,6 +188,9 @@ class FinancialCutover(models.Model):
             _rows, digest, _count = self._plan()
             if digest != self.snapshot_hash:
                 raise UserError("The selected data changed. Build a fresh Preview before moving.")
+            if not self._purchase_plan():
+                self._mark_up_to_date()
+                return True
             self._create_purchase_history(self.purchase_preview_data or [])
             self._system_write({"state": "done", "completed_at": fields.Datetime.now(), "completed_by": self.env.user.id})
         return {"type": "ir.actions.act_window", "name": "Completed company move",

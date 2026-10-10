@@ -1,6 +1,6 @@
 {
     "name": "Company Purchase Cutover",
-    "version": "19.0.3.0.0",
+    "version": "19.0.3.1.0",
     "summary": "Optional purchase history and replacement drafts for company moves",
     "category": "Inventory/Purchase", "author": "FiFO-move contributors", "license": "LGPL-3",
     "depends": ["company_financial_cutover", "purchase"],

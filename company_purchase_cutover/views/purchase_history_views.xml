@@ -4,9 +4,14 @@
         <field name="model">company.financial.purchase.history</field>
         <field name="arch" type="xml">
             <list create="0" edit="0" delete="0">
-                <field name="name" string="Original order"/><field name="vendor_name" string="Vendor"/>
-                <field name="original_status_label"/><field name="order_date" string="Original order date"/>
-                <field name="company_id" string="New company"/><field name="currency_id"/><field name="amount_total"/>
+                <field name="name" string="Original order"/>
+                <field name="vendor_name" string="Vendor"/>
+                <field name="original_status_label"/>
+                <field name="followup_required" optional="show"/>
+                <field name="order_date" string="Original order date"/>
+                <field name="company_id" string="New company"/>
+                <field name="currency_id"/>
+                <field name="amount_total"/>
                 <field name="target_order_id" string="Replacement order"/>
             </list>
         </field>
@@ -17,33 +22,37 @@
         <field name="arch" type="xml">
             <form create="0" edit="0" delete="0" duplicate="0">
                 <header>
-                    <button name="action_choose_vendor" type="object" string="Choose destination vendor"
-                        class="oe_highlight" groups="purchase.group_purchase_manager,base.group_system" invisible="replacement_step != 'vendor'"/>
-                    <button name="action_open_original" type="object" string="Open original order"
-                        class="oe_highlight" groups="purchase.group_purchase_manager,base.group_system" invisible="replacement_step != 'cancel'"/>
-                    <button name="action_prepare_draft" type="object" string="Prepare replacement draft" class="oe_highlight"
-                        groups="purchase.group_purchase_manager,base.group_system"
-                        invisible="replacement_step != 'prepare'"
-                        confirm="Prepare one unconfirmed draft in the new company? Review its vendor, products, prices and taxes before confirming. The original order must already be cancelled so it cannot be received or billed twice."/>
-                    <button name="action_prepare_draft" type="object" string="View replacement order" class="oe_highlight"
-                        groups="purchase.group_purchase_manager,base.group_system" invisible="not target_order_id"/>
-                    <button name="action_choose_vendor" type="object" string="Change vendor"
-                        groups="purchase.group_purchase_manager,base.group_system" invisible="replacement_step not in ['cancel', 'prepare']"/>
+                    <field name="can_manage_replacement" invisible="True"/>
+                    <button name="action_choose_vendor" type="object" string="Choose destination vendor" class="oe_highlight" groups="purchase.group_purchase_manager,base.group_system" invisible="replacement_step != 'vendor' or not can_manage_replacement"/>
+                    <button name="action_open_original" type="object" string="Open original to cancel" class="oe_highlight" groups="purchase.group_purchase_manager,base.group_system" invisible="replacement_step != 'cancel' or not can_manage_replacement"/>
+                    <button name="action_prepare_draft" type="object" string="Prepare replacement draft" class="oe_highlight" groups="purchase.group_purchase_manager,base.group_system" invisible="replacement_step != 'prepare' or not can_manage_replacement"/>
+                    <button name="action_prepare_draft" type="object" string="View replacement order" class="oe_highlight" groups="purchase.group_purchase_manager,base.group_system" invisible="not target_order_id or not can_manage_replacement"/>
+                    <button name="action_choose_vendor" type="object" string="Change vendor" groups="purchase.group_purchase_manager,base.group_system" invisible="replacement_step not in ['cancel', 'prepare'] or not can_manage_replacement"/>
                     <field name="replacement_step" invisible="True"/>
+                    <button name="action_refresh_status" type="object" string="Update order status" invisible="replacement_step in ['created', 'history']"/>
                 </header>
                 <sheet>
-                    <h1><field name="name"/></h1>
+                    <h1>
+                        <field name="name"/>
+                    </h1>
                     <p class="text-muted">Saved purchase history. Quantities and amounts show the order when copied. Receipts and bills were not recreated.</p>
+                    <div class="alert alert-info" role="status" invisible="replacement_step != 'history'">
+                        <strong>History only — no action needed.</strong>
+                        <p class="mb-0">
+                            <field name="replacement_note" nolabel="1"/>
+                        </p>
+                    </div>
+                    <p class="text-muted" invisible="can_manage_replacement or replacement_step in ['history', 'created']">Your Purchase manager can continue this order with both its old and new companies enabled.</p>
                     <div class="alert alert-info" role="status" invisible="replacement_step != 'vendor'">
-                        <strong>Step 1 of 3: Choose the vendor for the new order.</strong>
+                        <strong>Choose the vendor for the new order.</strong>
                         <p class="mb-0">Click Choose destination vendor and select the correct existing contact. This saves your choice; it does not create an order.</p>
                     </div>
                     <div class="alert alert-info" role="status" invisible="replacement_step != 'cancel'">
-                        <strong>Step 2 of 3: Cancel the original order in the old company.</strong>
-                        <p class="mb-0">Click Open original order, check the company and order number, then cancel it in Odoo. Return here afterwards to prepare the replacement draft. This avoids having two active orders.</p>
+                        <strong>Cancel the original order in the old company.</strong>
+                        <p class="mb-0">Open the original, verify its company and cancel it in Odoo. Return here and click Update order status to continue. The original must be cancelled before its replacement is prepared.</p>
                     </div>
                     <div class="alert alert-success" role="status" invisible="replacement_step != 'prepare'">
-                        <strong>Step 3 of 3: Prepare and review the replacement draft.</strong>
+                        <strong>Prepare and review the replacement draft.</strong>
                         <p class="mb-0">The original order is cancelled. Click Prepare replacement draft, then check the vendor, products, prices and taxes before confirming the new order.</p>
                     </div>
                     <div class="alert alert-success" role="status" invisible="replacement_step != 'created'">
@@ -52,12 +61,16 @@
                     </div>
                     <div class="alert alert-warning" role="status" invisible="replacement_step != 'manual'">
                         <strong>Ask your purchase manager to review this order.</strong>
-                        <p class="mb-0"><field name="replacement_note" nolabel="1"/></p>
+                        <p class="mb-0">
+                            <field name="replacement_note" nolabel="1"/>
+                        </p>
                     </div>
                     <group>
                         <group string="Original order when copied">
-                            <field name="vendor_name" string="Vendor"/><field name="original_status_label" string="Status when copied"/>
-                            <field name="order_date" string="Order date"/><field name="source_company_name"/>
+                            <field name="vendor_name" string="Vendor"/>
+                            <field name="original_status_label" string="Status when copied"/>
+                            <field name="order_date" string="Order date"/>
+                            <field name="source_company_name"/>
                             <field name="currency_id" options="{'no_open': True}"/>
                             <field name="amount_total" string="Original order total"/>
                         </group>
@@ -85,9 +98,7 @@
                     <field name="history_id" invisible="True"/>
                     <field name="original_vendor" string="Old company vendor"/>
                     <field name="company_id" string="New company" options="{'no_open': True}"/>
-                    <field name="vendor_id" options="{'no_create': True}"
-                        context="{'allowed_company_ids': [company_id], 'show_email': True, 'show_vat': True}"
-                        domain="[('company_id', 'in', [False, company_id]), ('active', '=', True)]"/>
+                    <field name="vendor_id" options="{'no_create': True}" context="{'allowed_company_ids': [company_id], 'show_email': True, 'show_vat': True}" domain="[('company_id', 'in', [False, company_id]), ('active', '=', True)]"/>
                 </group>
                 <group string="Check this is the correct vendor" invisible="not vendor_id">
                     <field name="vendor_reference"/>
@@ -107,6 +118,38 @@
         <field name="res_model">company.financial.purchase.history</field>
         <field name="view_mode">list,form</field>
     </record>
-    <menuitem id="purchase_history_menu" name="Migrated purchase history" parent="purchase.menu_purchase_root"
-        action="purchase_history_action" groups="purchase.group_purchase_user" sequence="90"/>
+    <menuitem id="purchase_history_menu" name="Migrated purchase history" parent="purchase.menu_purchase_root" action="purchase_history_action" groups="purchase.group_purchase_user" sequence="90"/>
+    <record id="purchase_history_search" model="ir.ui.view">
+        <field name="name">company.purchase.history.search</field>
+        <field name="model">company.financial.purchase.history</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="name"/>
+                <field name="vendor_name"/>
+                <field name="company_id"/>
+                <filter name="needs_work" string="Orders needing action" domain="[('followup_required', '=', True)]"/>
+                <filter name="history_only" string="History only" domain="[('followup_required', '=', False), ('target_order_id', '=', False)]"/>
+                <filter name="replaced" string="Already replaced" domain="[('target_order_id', '!=', False)]"/>
+            </search>
+        </field>
+    </record>
+    <record id="purchase_followup_action" model="ir.actions.act_window">
+        <field name="name">Purchase orders to continue</field>
+        <field name="res_model">company.financial.purchase.history</field>
+        <field name="view_mode">list,form</field>
+        <field name="context">{'search_default_needs_work': 1}</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">No orders need action in this view</p>
+            <p>Remove the Orders needing action filter to see all saved history.</p>
+        </field>
+    </record>
+    <menuitem id="purchase_followup_menu" name="Purchase orders to continue" parent="purchase.menu_purchase_root" action="purchase_followup_action" groups="purchase.group_purchase_user" sequence="89"/>
+    <record id="purchase_move_action" model="ir.actions.act_window">
+        <field name="name">Move purchase history</field>
+        <field name="res_model">company.financial.cutover</field>
+        <field name="view_mode">list,form</field>
+        <field name="domain">[('include_financial', '=', False), ('include_purchase_history', '=', True)]</field>
+        <field name="context">{'default_include_financial': False, 'default_include_purchase_history': True}</field>
+    </record>
+    <menuitem id="purchase_move_menu" name="Move purchase history" parent="purchase.menu_purchase_config" action="purchase_move_action" groups="purchase.group_purchase_manager" sequence="95"/>
 </odoo>

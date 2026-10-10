@@ -4,4 +4,64 @@
         <field name="model_id" ref="model_company_financial_purchase_history"/>
         <field name="domain_force">[('company_id', 'in', company_ids)]</field>
     </record>
+    <record id="company_financial_cutover_purchase_scope" model="ir.rule">
+        <field name="name">Purchase-only access</field>
+        <field name="model_id" ref="company_financial_cutover.model_company_financial_cutover"/>
+        <field name="groups" eval="[(4, ref('purchase.group_purchase_manager'))]"/>
+        <field name="domain_force">[('include_financial', '=', False)]</field>
+    </record>
+    <record id="company_financial_cutover_accountant_scope" model="ir.rule">
+        <field name="name">Accountant access</field>
+        <field name="model_id" ref="company_financial_cutover.model_company_financial_cutover"/>
+        <field name="groups" eval="[(4, ref('account.group_account_manager'))]"/>
+        <field name="domain_force">[(1, '=', 1)]</field>
+    </record>
+    <record id="company_financial_partner_mapping_purchase_scope" model="ir.rule">
+        <field name="name">Purchase-only access</field>
+        <field name="model_id" ref="company_financial_cutover.model_company_financial_partner_mapping"/>
+        <field name="groups" eval="[(4, ref('purchase.group_purchase_manager'))]"/>
+        <field name="domain_force">[('cutover_id.include_financial', '=', False)]</field>
+    </record>
+    <record id="company_financial_partner_mapping_accountant_scope" model="ir.rule">
+        <field name="name">Accountant access</field>
+        <field name="model_id" ref="company_financial_cutover.model_company_financial_partner_mapping"/>
+        <field name="groups" eval="[(4, ref('account.group_account_manager'))]"/>
+        <field name="domain_force">[(1, '=', 1)]</field>
+    </record>
+    <record id="company_financial_account_mapping_purchase_scope" model="ir.rule">
+        <field name="name">Purchase-only access</field>
+        <field name="model_id" ref="company_financial_cutover.model_company_financial_account_mapping"/>
+        <field name="groups" eval="[(4, ref('purchase.group_purchase_manager'))]"/>
+        <field name="domain_force">[('cutover_id.include_financial', '=', False)]</field>
+    </record>
+    <record id="company_financial_account_mapping_accountant_scope" model="ir.rule">
+        <field name="name">Accountant access</field>
+        <field name="model_id" ref="company_financial_cutover.model_company_financial_account_mapping"/>
+        <field name="groups" eval="[(4, ref('account.group_account_manager'))]"/>
+        <field name="domain_force">[(1, '=', 1)]</field>
+    </record>
+    <record id="company_financial_cutover_line_purchase_scope" model="ir.rule">
+        <field name="name">Purchase-only access</field>
+        <field name="model_id" ref="company_financial_cutover.model_company_financial_cutover_line"/>
+        <field name="groups" eval="[(4, ref('purchase.group_purchase_manager'))]"/>
+        <field name="domain_force">[('cutover_id.include_financial', '=', False)]</field>
+    </record>
+    <record id="company_financial_cutover_line_accountant_scope" model="ir.rule">
+        <field name="name">Accountant access</field>
+        <field name="model_id" ref="company_financial_cutover.model_company_financial_cutover_line"/>
+        <field name="groups" eval="[(4, ref('account.group_account_manager'))]"/>
+        <field name="domain_force">[(1, '=', 1)]</field>
+    </record>
+    <record id="company_financial_copied_invoice_purchase_scope" model="ir.rule">
+        <field name="name">Purchase-only access</field>
+        <field name="model_id" ref="company_financial_cutover.model_company_financial_copied_invoice"/>
+        <field name="groups" eval="[(4, ref('purchase.group_purchase_manager'))]"/>
+        <field name="domain_force">[('cutover_id.include_financial', '=', False)]</field>
+    </record>
+    <record id="company_financial_copied_invoice_accountant_scope" model="ir.rule">
+        <field name="name">Accountant access</field>
+        <field name="model_id" ref="company_financial_cutover.model_company_financial_copied_invoice"/>
+        <field name="groups" eval="[(4, ref('account.group_account_manager'))]"/>
+        <field name="domain_force">[(1, '=', 1)]</field>
+    </record>
 </odoo>

@@ -5,13 +5,18 @@ FRESH FINANCIAL-ONLY INSTALL
 2. Copy company_financial_cutover into your configured addons directory.
 3. Restart Odoo, update the Apps list in developer mode, remove the Apps filter,
    and install Company Financial Cutover. This installs Accounting, not Purchase.
-4. New moves default to Financial balances and unpaid items.
+4. New moves default to Financial balances and unpaid items. Choose the companies,
+   click Review my move, resolve the listed decisions together, then Confirm move.
+   Old branches and existing destination accounting are detected automatically;
+   the accountant still reviews and confirms any earlier transfers.
 
 OPTIONAL PURCHASE MIGRATION
 Copy company_purchase_cutover alongside the financial addon, restart Odoo,
 update the Apps list and explicitly install Company Purchase Cutover. It requires
 Odoo's Purchase app. Select Purchase orders or Both to copy all selected-company
-orders, including historical/cancelled orders, as read-only history.
+orders, including historical/cancelled orders, as read-only history. Purchase
+managers can use Purchase > Configuration > Move purchase history without
+Accounting administrator rights. Use a maintenance window for the initial copy.
 
 UPGRADE FROM THE COMBINED FINANCIAL ADDON (19.0.2.0.1)
 Copy BOTH company_financial_cutover and company_purchase_cutover folders before

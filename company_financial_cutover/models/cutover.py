@@ -36,7 +36,7 @@ class FinancialCutover(models.Model):
     mapping_ids = fields.One2many("company.financial.account.mapping", "cutover_id", copy=False)
     partner_mapping_ids = fields.One2many("company.financial.partner.mapping", "cutover_id", copy=False)
     line_ids = fields.One2many("company.financial.cutover.line", "cutover_id", readonly=True, copy=False)
-    state = fields.Selection([("draft", "Getting ready"), ("preview", "Ready to move"), ("done", "Completed")],
+    state = fields.Selection([("draft", "Choose"), ("preview", "Review"), ("done", "Completed")],
         default="draft", required=True, readonly=True, copy=False)
     snapshot_hash = fields.Char(readonly=True, copy=False)
     move_id = fields.Many2one("account.move", string="Opening entry", readonly=True, copy=False, ondelete="restrict")
@@ -44,14 +44,18 @@ class FinancialCutover(models.Model):
     completed_by = fields.Many2one("res.users", readonly=True, copy=False)
     summary = fields.Text(readonly=True, copy=False)
     check_status = fields.Selection([("unchecked", "Check needed"), ("blocked", "Needs attention"),
-        ("ready", "Ready to review")], default="unchecked", readonly=True, copy=False)
+        ("ready", "Ready to confirm"), ("up_to_date", "Already up to date")], default="unchecked", readonly=True, copy=False)
     check_report = fields.Text(string="Check results", readonly=True, copy=False)
 
+    def _has_move_role(self):
+        return (self.env.user.has_group("base.group_system")
+            and self.env.user.has_group("account.group_account_manager"))
+
     def _operator(self):
-        if not (self.env.user.has_group("base.group_system")
-                and self.env.user.has_group("account.group_account_manager")):
-            raise AccessError("A Settings administrator with Accounting administrator access must run this cutover.")
         for batch in self:
+            if not batch._has_move_role():
+                raise AccessError("Financial and stock cutovers require Settings and Accounting administrator rights. "
+                    "Including purchase history also requires Purchase user access. A Purchase manager can copy purchase history alone.")
             if not (batch._source_companies() | batch.target_company_id) <= self.env.companies:
                 raise AccessError("Enable the old company, every included branch and the new company in the company switcher.")
 
@@ -97,7 +101,7 @@ class FinancialCutover(models.Model):
     def _suggest_settings(self):
         """Prefer the standard MISC journal; never guess an ambiguous equity account."""
         for batch in self:
-            if not batch.target_company_id:
+            if not batch.target_company_id or not batch.include_financial:
                 continue
             values = {}
             if not batch.journal_id:
@@ -237,11 +241,14 @@ class FinancialCutover(models.Model):
 
     def action_match(self):
         """Prepare editable choices without creating destination business records."""
+        return self._review_selected_data()
+
+    def _review_selected_data(self, build_preview=False):
         self.ensure_one()
         self._operator()
         self._invalidate_preview()
         if not self.include_financial:
-            return self._check_purchase_only()
+            return self._check_purchase_only(build_preview=build_preview)
         self._suggest_settings()
         try:
             lines = self._source_lines()
@@ -268,19 +275,33 @@ class FinancialCutover(models.Model):
             })
         financial_partners = lines.filtered(lambda l: l.account_id.account_type in OPEN_ITEM_TYPES
             and (not self.currency_id.is_zero(self._residual(l)[0]) or not l.currency_id.is_zero(self._residual(l)[1]))).partner_id
-        self._match_contacts(financial_partners | self._purchase_contacts(), financial_partners)
-        reused = len(self.partner_mapping_ids.filtered("target_partner_id"))
-        new = len(self.partner_mapping_ids.filtered(lambda m: not m.target_partner_id and m.create_contact))
+        issues = []
+        try:
+            purchase_partners = self._purchase_contacts()
+        except UserError as exc:
+            purchase_partners = self.env["res.partner"]
+            issues.append(str(exc))
+        self._match_contacts(financial_partners | purchase_partners, financial_partners)
+        active_choices = self.partner_mapping_ids.filtered(
+            lambda m: m.source_partner_id in financial_partners | purchase_partners)
+        reused = len(active_choices.filtered("target_partner_id"))
+        new = len(active_choices.filtered(lambda m: not m.target_partner_id and m.create_contact))
         report = ["Existing accounts and contacts are reused wherever a clear match is found.",
             "Contacts: %s existing; %s proposed new; %s need a choice." % (
-                reused, new, len(self.partner_mapping_ids) - reused - new)]
-        needs_choice = self.partner_mapping_ids.filtered(lambda m: not m.target_partner_id and not m.create_contact)
+                reused, new, len(active_choices) - reused - new)]
+        needs_choice = active_choices.filtered(lambda m: m.required_for_financial
+            and not m.target_partner_id and not m.create_contact)
         if needs_choice:
             report.append("Choose the correct existing contact for: %s. Name alone is not enough to auto-match different records."
                 % ", ".join(needs_choice[:10].source_partner_id.mapped("display_name")))
-        issues = []
+        vendor_choices = active_choices.filtered(lambda m: not m.required_for_financial
+            and not m.target_partner_id)
+        if vendor_choices:
+            report.append("%s purchase vendors can be chosen later from saved history when preparing replacements. "
+                "Their missing choices do not block copying history." % len(vendor_choices))
+        plan = None
         try:
-            self._plan()
+            plan = self._plan()
         except UserError as exc:
             issues.append(str(exc))
         # Purchase checks are independent of financial setup. Run them even
@@ -298,11 +319,16 @@ class FinancialCutover(models.Model):
         if notices:
             report.append("For review — these notices do not block copying:\n" + "\n".join("• " + note for note in notices))
         self._system_write({"check_status": status, "check_report": "\n\n".join(report)})
+        if build_preview and not issues:
+            self._store_preview(plan)
         return True
 
     def _match_contacts(self, partners, create_partners=None):
         """Purchase vendors need explicit choices too, without creating contacts."""
         create_partners = create_partners or self.env["res.partner"]
+        required = self.partner_mapping_ids.filtered(lambda m: m.source_partner_id in create_partners)
+        required.filtered(lambda m: not m.required_for_financial)._system_write({"required_for_financial": True})
+        (self.partner_mapping_ids - required).filtered("required_for_financial")._system_write({"required_for_financial": False})
         existing = set(self.partner_mapping_ids.source_partner_id.ids)
         pool = self._contact_pool()
         for partner in partners.sorted("id"):
@@ -314,6 +340,7 @@ class FinancialCutover(models.Model):
                 "cutover_id": self.id, "source_partner_id": partner.id,
                 "target_partner_id": matches.id if automatic else False,
                 "create_contact": not matches and partner in create_partners,
+                "required_for_financial": partner in create_partners,
             })
 
     @staticmethod
@@ -582,7 +609,11 @@ class FinancialCutover(models.Model):
     def action_preview(self):
         self.ensure_one()
         self._operator()
-        rows, digest, count = self._plan()
+        self._store_preview(self._plan())
+        return True
+
+    def _store_preview(self, plan):
+        rows, digest, count = plan
         self.line_ids._system_unlink()
         self.env["company.financial.cutover.line"]._system_create([
             {"cutover_id": self.id, "sequence": index, **row} for index, row in enumerate(rows, 1)
@@ -594,7 +625,6 @@ class FinancialCutover(models.Model):
                 % (count, sum(row["kind"] == "open_item" for row in rows),
                     formatLang(self.env, debit, currency_obj=self.currency_id),
                     formatLang(self.env, credit, currency_obj=self.currency_id))})
-        return True
 
     def _lock_tables(self):
         return ("account_move", "account_move_line", "account_partial_reconcile", "account_payment",
@@ -615,7 +645,10 @@ class FinancialCutover(models.Model):
             raise UserError("Accounting is busy. Stop accounting activity and retry during the cutover maintenance window.") from exc
         self._assert_fresh_snapshot(snapshot)
         companies = self._source_companies() | self.target_company_id
-        companies.check_access("write")
+        # Purchase-only copying does not alter company settings. Its authorized
+        # manager still needs read access to every scoped company. The SQL no-op
+        # below is only a serialization fence, not a company-settings mutation.
+        companies.check_access("write" if self.include_financial or not self.include_purchase_history else "read")
         # Odoo uses repeatable-read transactions. A real row update forces a
         # concurrent stale request to retry rather than reuse an old snapshot.
         self.env.cr.execute("UPDATE res_company SET write_date = write_date WHERE id = ANY(%s)", [companies.ids])
@@ -754,7 +787,10 @@ class FinancialCutover(models.Model):
 
     def action_open_entry(self):
         self.ensure_one()
-        self._operator()
+        self.check_access("read")
+        if not self.move_id:
+            raise UserError("This move has no financial opening entry.")
+        self.move_id.check_access("read")
         return {"type": "ir.actions.act_window", "name": "Financial Opening Entry",
             "res_model": "account.move", "res_id": self.move_id.id, "view_mode": "form"}
 

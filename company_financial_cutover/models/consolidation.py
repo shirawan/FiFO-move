@@ -35,7 +35,7 @@ class FinancialCutover(models.Model):
     @api.depends("source_company_id", "include_source_branches", "completed_source_ids", "state")
     def _compute_source_scope(self):
         for batch in self:
-            batch.source_scope_description = "Included: " + ", ".join(batch._source_companies().mapped("name"))
+            batch.source_scope_description = "Included: " + ", ".join([company.name + (" (archived)" if not company.active else "") for company in batch._source_companies()])
 
     def _source_companies(self):
         self.ensure_one()
@@ -209,7 +209,10 @@ class FinancialCutover(models.Model):
     def _review_notices(self, lines):
         notices = super()._review_notices(lines)
         if self.include_source_branches:
-            notices.append(self.source_scope_description + ". Balances are combined; unpaid items and purchase histories retain their original company. Check any balances between the old branches with your accountant; no intercompany elimination is guessed.")
+            details = ("Balances are combined; unpaid items and purchase histories retain their original company. "
+                "Check any balances between the old branches with your accountant; no intercompany elimination is guessed."
+                if self.include_financial else "Purchase histories retain their original company; financial balances are not changed.")
+            notices.append(self.source_scope_description + ". " + details)
         if self.include_financial and self.destination_mode == "existing":
             notices.append("The new company is already in use. Its invoices, bills, payments and new trading entries stay in place. Only the earlier opening entries you select receive reversals; explicitly matched copied invoices/bills are omitted from this opening.")
             # Candidate detection is advisory. Same totals/references are not
@@ -277,8 +280,8 @@ class FinancialCutover(models.Model):
             if len(group) > 1 and any(line.amount_residual > 0 for line in group) and any(line.amount_residual < 0 for line in group):
                 group.reconcile()
 
-    def action_preview(self):
-        result = super().action_preview()
+    def _store_preview(self, plan):
+        super()._store_preview(plan)
         if self.include_financial and self.destination_mode == "existing":
             details = "\nExisting data: %s earlier opening entries will receive posted reversals; %s matched invoices/bills are already present and are excluded. Other new-company records stay in place." % (len(self.prior_opening_move_ids), len(self.copied_invoice_ids))
             if self.prior_opening_move_ids:
@@ -296,7 +299,6 @@ class FinancialCutover(models.Model):
                     "added": self.currency_id.round(added[account_id]), "removed": self.currency_id.round(-removed[account_id]),
                     "after": self.currency_id.round(before.get(account_id, 0) + added[account_id] - removed[account_id])})
             self._system_write({"summary": (self.summary or "") + details, "destination_balance_preview": preview})
-        return result
 
     @api.depends("destination_balance_preview", "currency_id")
     def _compute_destination_balance_html(self):

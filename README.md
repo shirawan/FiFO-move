@@ -6,9 +6,9 @@ in the same database.
 - `company_stock_fifo_migration`: Company Stock Cutover 19.0.2.7.7, based on the supplied
   19.0.2.7.3 addon, with a clearer existing-stock preview. Requires Odoo Enterprise `stock_accountant`,
   `product_expiry`, and the separate `company_kit_bom_migration` addon.
-- `company_financial_cutover` 19.0.3.0.0: opening balances and unpaid customer/vendor
+- `company_financial_cutover` 19.0.3.1.0: opening balances and unpaid customer/vendor
   items. Requires Odoo 19 `account`; it does not install Purchase.
-- `company_purchase_cutover` 19.0.3.0.0: optional purchase history and replacement
+- `company_purchase_cutover` 19.0.3.1.0: optional purchase history and replacement
   drafts. Requires the financial addon and Odoo's Purchase app. Install this addon
   explicitly when you want purchase migration. Upgrading the previously combined
   addon preserves its existing purchase feature by installing the new addon.
@@ -69,6 +69,9 @@ bash tools/test_retention.sh
 bash tools/start_cloud.sh
 ```
 
+Run the maintenance test scripts sequentially: they share this isolated PostgreSQL
+cluster's maintenance setting and restore it when each run ends.
+
 The combined test runner installs/upgrades the financial and optional purchase addons in a disposable local
 development database and exercises native Odoo accounting, forms and permissions.
 It does not connect to a production database. The stock addon requires its
@@ -124,3 +127,5 @@ archive isolation and duplicate prevention. Evidence stays outside the repositor
 `python tools/build_bundle.py /workspace/artifacts` builds bundles from a clean
 committed checkout. The full bundle includes all addon folders, top-level README,
 INSTALL.txt, tests and tools; runtime databases, credentials and caches are excluded.
+
+The move screen uses **Choose → Review → Confirm**. **Review my move** detects old branches and existing destination accounting, collects required decisions and prepares the preview. Existing transfers still require explicit accountant review. Purchase managers can copy history alone from Purchase configuration. Already-copied purchase history returns a successful no-change result; the post-go-live queue shows only orders with remaining work.

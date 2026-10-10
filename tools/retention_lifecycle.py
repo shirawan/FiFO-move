@@ -297,12 +297,10 @@ else:
         repeat = demo["company.financial.cutover"].create({
             "source_company_id": data["source"], "target_company_id": data["target"],
             "include_financial": False, "include_purchase_history": True})
-        try:
-            repeat.action_preview()
-        except UserError as exc:
-            assert "no new purchase orders" in str(exc)
-        else:
-            raise AssertionError("Already copied purchase must not be copied again")
+        repeat.action_review()
+        assert repeat.check_status == "up_to_date"
+        assert repeat.state == "draft" and not repeat.snapshot_hash
+        assert not repeat.archive_attachment_id
         print("SURVIVAL: reinstall restored audit/history and native links; repeated restore and purchase retry created no duplicates.")
     else:
         raise AssertionError("Unknown lifecycle step")

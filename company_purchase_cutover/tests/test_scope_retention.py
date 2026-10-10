@@ -77,7 +77,7 @@ class TestScopeAndRetention(PurchaseMigrationCase):
         self.assertEqual(history.snapshot["lines"][0]["received"], 0)
         self.assertFalse(history.target_order_id)
 
-    def test_purchase_only_name_match_can_be_chosen_before_original_cancellation(self):
+    def test_purchase_only_name_match_is_chosen_after_copy_before_original_cancellation(self):
         old = self.env["res.partner"].create({"name": "Local supplier", "company_id": self.source.id})
         target = self.env["res.partner"].create({"name": "Local supplier", "company_id": self.target.id})
         original = self._order(confirmed=True)
@@ -87,10 +87,16 @@ class TestScopeAndRetention(PurchaseMigrationCase):
         self.assertEqual(batch.partner_mapping_ids.source_partner_id, old)
         self.assertFalse(batch.partner_mapping_ids.target_partner_id)
         self.assertIn("Vendors needing a choice: 1", batch.check_report)
-        with Form(batch) as form:
-            with form.partner_mapping_ids.edit(0) as choice:
-                choice.target_partner_id = target
-        self._run(batch)
+        batch.action_review()
+        batch.action_apply()
+        history = batch.purchase_history_ids
+        action = history.action_choose_vendor()
+        with Form(self.env[action["res_model"]].with_context(action["context"])) as chooser:
+            chooser.vendor_id = target
+        chooser.record.action_confirm()
+        self.assertEqual(history.destination_vendor_id, target)
+        self.assertEqual(history.replacement_step, "cancel")
+        self.assertFalse(history.target_order_id)
         original.button_cancel()
         batch.purchase_history_ids.action_prepare_draft()
         self.assertEqual(batch.purchase_history_ids.target_order_id.partner_id, target)
@@ -286,9 +292,11 @@ class TestScopeAndRetention(PurchaseMigrationCase):
         first = self._run(self._purchase_batch())
         repeat = self._purchase_batch()
         repeat.action_match()
-        self.assertEqual(repeat.check_status, "blocked")
-        with self.assertRaisesRegex(UserError, "no new purchase orders"):
-            repeat.action_preview()
+        self.assertEqual(repeat.check_status, "up_to_date")
+        repeat.action_preview()
+        self.assertEqual(repeat.state, "draft")
+        self.assertFalse(repeat.snapshot_hash)
+        self.assertFalse(repeat.archive_attachment_id)
         self.assertEqual(self.env["company.financial.purchase.history"].search_count([
             ("company_id", "=", self.target.id)]), 1)
         self.assertTrue(first.report_attachment_id)

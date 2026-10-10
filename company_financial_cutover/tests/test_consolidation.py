@@ -10,6 +10,19 @@ from .test_cutover import FinancialCutoverCase
 
 @tagged('post_install', '-at_install')
 class TestConsolidation(FinancialCutoverCase):
+    def test_review_detects_complete_scope_including_archived_branch(self):
+        branches = self._branches()
+        for company, amount in zip(self.source | branches, (10, 20, 30)):
+            self._entry(company, [("bank", amount), ("equity", -amount)])
+        branches[1].active = False
+        batch = self._batch()
+        batch.action_review()
+        self.assertTrue(batch.include_source_branches)
+        self.assertEqual(batch.state, "preview")
+        self.assertTrue(all(branch.name in batch.source_scope_description for branch in branches))
+        batch.action_apply()
+        self.assertEqual(batch.move_id.line_ids.filtered(lambda line: line.balance > 0).balance, 60)
+
     def _branches(self):
         branches = self.env['res.company'].create([
             {'name': name, 'parent_id': self.source.id} for name in ('Branch B', 'Branch C')])

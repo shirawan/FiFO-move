@@ -3,3 +3,4 @@ from . import test_preflight
 from . import test_consolidation
 
 from . import test_recovery
+from . import test_workflow

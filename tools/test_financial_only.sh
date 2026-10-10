@@ -5,6 +5,22 @@ source "$(dirname "${BASH_SOURCE[0]}")/runtime.sh"
 fifo_start_database
 FIFO_ONLY_DB="fifo_account_only_$(date -u +%Y%m%d%H%M%S)_$$"
 FIFO_ONLY_LOG="$FIFO_RUNTIME_DIR/$FIFO_ONLY_DB.log"
+# Serialize test runners that alter maintenance on this dedicated cluster.
+# TransactionCase fixtures bypass Odoo's request retry loop, so background
+# vacuum must not take NOWAIT locks while those long fixture transactions run.
+fifo_only_sql() {
+    "$FIFO_PG_BIN/psql" -h "$FIFO_RUNTIME_DIR/socket" -p 55432 -U agent -d postgres -At -v ON_ERROR_STOP=1 -c "$1"
+}
+test "$(fifo_only_sql 'SHOW data_directory')" = "$FIFO_RUNTIME_DIR/pgdata"
+FIFO_ONLY_AUTOVACUUM=$(fifo_only_sql 'SHOW autovacuum')
+case "$FIFO_ONLY_AUTOVACUUM" in on|off) ;; *) exit 1 ;; esac
+fifo_only_restore_maintenance() {
+    fifo_only_sql "ALTER SYSTEM SET autovacuum = '$FIFO_ONLY_AUTOVACUUM'" >/dev/null
+    fifo_only_sql 'SELECT pg_reload_conf()' >/dev/null
+}
+trap fifo_only_restore_maintenance EXIT
+fifo_only_sql "ALTER SYSTEM SET autovacuum = 'off'" >/dev/null
+fifo_only_sql 'SELECT pg_reload_conf()' >/dev/null
 "$FIFO_PG_BIN/createdb" -h "$FIFO_RUNTIME_DIR/socket" -p 55432 -U agent -T template0 "$FIFO_ONLY_DB"
 "$FIFO_PYTHON" "$FIFO_ODOO_DIR/odoo-bin" -d "$FIFO_ONLY_DB" --db_host="$FIFO_RUNTIME_DIR/socket" \
     --db_port=55432 --db_user=agent --addons-path="$FIFO_ODOO_DIR/addons,$FIFO_REPO_DIR" \

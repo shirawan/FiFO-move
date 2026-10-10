@@ -36,16 +36,13 @@ addon alone does not install Odoo's Purchase app.
 
 ## Setup and guided steps
 
-The screen highlights the next step: **Check existing data → Review selected data →
-Move selected data** (or **Copy purchase history** for purchase-only moves). Messages explain what needs attention and who can help. Reviewed
-amounts appear directly on the page; account and contact choices stay under **Review matches** and **Accountant setup**. A completed move shows its result and the
-next stock step.
+The workflow is **Choose → Review → Confirm**. **Review my move** checks existing data, prepares clear matches and builds the review in one action. **Decisions needed** lists independently detectable blockers together; missing accounts and ambiguous financial contacts can be resolved under **Choices to resolve**. Resolved matches are collapsed under **Move details**, and financial settings remain under **Accountant setup**. **Update review** repeats the same review action after changes. Completion shows a receipt, the report and any remaining purchase or stock work.
 
 1. Install this addon from your custom addons directory. In Apps, update the Apps
    List and search for **Company Financial Cutover** with the Apps filter removed. Odoo installs its `account` dependency. Purchase is optional: install **Company Purchase Cutover** separately if you need purchase migration.
 2. For financial balances, configure the replacement company's chart, journals and fiscal year correctly.
    Both companies must use the same accounting currency and fiscal year start.
-   Choose whether the replacement has no accounting yet or is already in use.
+   The screen detects existing accounting records and routes an already-used replacement to accountant review.
    In fresh-company mode, it must have **no draft or posted accounting entries,
    and no active payments**. For an existing company, review earlier transfers
    as described below. Take a verified
@@ -53,15 +50,13 @@ next stock step.
 3. Sign in as a Settings administrator with Accounting administrator access and
    enable both companies. Open **Accounting/Invoicing → Configuration → Move
    Company Data**. Choose what to move and the old and new companies. For financial balances, enter the date. The existing MISC journal is preferred; otherwise a single suitable general journal is selected. Cash-basis and exchange-difference journals are excluded. Retained earnings are selected only when there is one suitable account. An earnings choice is needed only when earlier years have a nonzero net profit/loss; multiple earnings accounts do not block a move that does not use one. Financial setup tabs are hidden for purchase-only moves.
-4. Click **1. Check existing data**. Matching uses account codes and types
+4. Click **Review my move**. Matching uses account codes and types
    against the destination's existing chart. Select accounts manually where the
    codes differ. Missing or incompatible account choices block posting; accounts
    are not silently created or source settings copied. The same shared contact record is reused. Different contact records are auto-matched only by a compatible tax ID or reference. Names help find possible matches but always require an explicit choice. Archived matches are included and need reactivation or review. A minimal destination contact is proposed only when no possible match exists. Proposed
    new contacts copy identity/address only, without old fiscal positions, bank
    accounts, payment terms or accounting properties.
-   Purchase-only moves also show existing vendor choices. History can be copied
-   without resolving every vendor; choose the correct destination vendor before
-   cancelling an original order for a replacement draft.
+   Purchase vendor choices can wait until preparing replacements. History copying does not require resolving every vendor; select the destination vendor before cancelling an original order for a replacement draft.
 5. If using the separate stock mover, review every source inventory valuation
    account and mark **Handled by Stock Cutover**. Known company/category stock
    valuation accounts are marked automatically when those fields are available.
@@ -69,12 +64,12 @@ next stock step.
    that addon is installed. Otherwise configure a Current Assets clearing account
    and explicitly use that same account in the stock mover. A mismatch with the stock mover’s saved destination clearing account blocks the financial opening. Inventory is excluded
    from this financial entry and carried through clearing instead.
-6. Read **Check results**. Independent setup, account and contact problems are listed together; resolve the blocking items. Review notices do not require source cleanup and stay visible during approval. Run Check existing data again after editing choices. Click **2. Review selected data**. This creates review/audit rows only, without
+6. Read **Decisions needed** and **Review information**. Independent setup, account and contact problems are listed together; resolve the blocking items. Advisory notices do not require source cleanup. Click **Review my move** again after editing choices. When checks pass, the same action builds the review automatically. This creates review/audit rows only, without
    destination contacts or journals. Reconcile the trial balance, retained
    earnings, stock exclusions and each unpaid item with the accountant. Rebuild
    Preview after any configuration, mapping or accounting changes.
 7. If moving financial balances, finish bank reconciliation in the old company on or before the cutover date. Unsettled outstanding receipts/payments, suspense and interbank-transfer items block the financial move; these items are not carried individually. Pause writes, scheduled jobs, queue workers and other users across this database during the move window. Ask your Odoo administrator to stop cron workers, including cron workers in other Odoo processes; `--max-cron-threads=0` applies only to the process it starts.
-   Click **3. Move selected data**, or **3. Copy purchase history** for purchase-only moves. Busy tables, changed
+   Click **Confirm move**, or **Confirm history copy** for purchase-only moves. Busy tables, changed
    previews, wrong posting dates or reconciliation differences refuse/roll back
    the operation. Review the completed data and, if financial balances were selected, **View opening entry**.
    Run the stock cutover afterwards on the same agreed date and with the same
@@ -84,7 +79,7 @@ next stock step.
 ### Purchase orders
 
 Install **Company Purchase Cutover** separately to enable these actions. The
-initial cutover still requires Settings and Accounting administrator rights.
+financial or combined cutover requires Settings and Accounting administrator rights. Purchase-only history copying can be run by a Purchase manager through **Purchase → Configuration → Move purchase history**, without granting accounting access. The initial history copy still uses the full maintenance-window locks; this is separate from the lightweight daily follow-up actions.
 After go-live, a **Purchase manager** can choose vendors and prepare eligible
 replacement drafts with the original order's company and the new company selected;
 Settings and Accounting administrator roles are not required for these daily actions.
@@ -100,7 +95,7 @@ purchase orders** in **Move** to include every source purchase order in the
 review and approval. These snapshots preserve order and
 vendor references, status, dates, currency, totals, original terms, products,
 quantities, prices, discounts, original tax labels and bill references. The
-**Review selected data** section shows what will be copied. After completion,
+**Result** section shows what will be copied. After completion,
 the **Purchase orders** tab shows saved history. Copies also appear under
 **Purchase → Migrated purchase history** after approval. Purchase user access is
 required to include orders; the financial operator still needs Settings and
@@ -138,9 +133,9 @@ state check the original remains cancelled. Both orders are locked during approv
 and the old order cannot be reconfirmed while a replacement exists. The migrated
 replacement cannot be duplicated through this addon.
 
-Partially received/billed orders, down payments, cancelled orders, dropshipping
+Partially received/billed orders, down payments, dropshipping
 and mismatched or ambiguous vendor/product identities require manual purchase
-manager review. Their full history and remaining quantities are still included;
+manager review. Cancelled orders and fully received-and-billed orders remain neutral history with no replacement task. Their full history and remaining quantities are still included;
 no operational draft is created automatically for these cases. Only shared
 products or existing company-specific products with a unique reference/barcode
 and matching unit are eligible for draft preparation. This action does not
@@ -239,7 +234,7 @@ remain readable files, with no automatic stock-wizard reconstruction.
 
 ## Old company with branches; new company already in use
 
-Select the old parent company and **Include old branches**. Select the standalone
+Select the old parent company; its branches are detected and included automatically. Select the standalone
 new company. Choose **New company is already in use** when its books already
 contain activity. Existing destination data alone is not a reason to clean it up.
 
@@ -260,10 +255,10 @@ amounts before confirming **Accountant has reviewed existing data**:
   in place. Name/reference or amount similarity never automatically skips it.
 - **Payment schedules** show original installments before payments, including
   amounts and due dates in both companies. Different due dates or installment
-  amounts appear together in **Check results**. Ask your accountant to confirm
+  amounts appear together in **Review information**. Ask your accountant to confirm
   intended changes: aging and collection follow the new copy's schedule. The
   mover preserves that schedule and all existing payments.
-- **Possible draft invoice/bill copies** also appear in **Check results**. A draft
+- **Possible draft invoice/bill copies** also appear in **Review information**. A draft
   does not represent a posted opening and cannot be paired as a completed copy.
   Before moving, cancel a confirmed duplicate draft or post it and explicitly
   pair it with its original. Posting an old copied draft after moving can duplicate
@@ -298,7 +293,7 @@ native openings/adjustments and restores links without reposting them.
 
 ## Boundaries
 
-- The destination must be standalone. Select **Include old branches** to combine
+- The destination must be standalone. The screen includes detected old branches to combine
   the source parent and all descendants, including archived branches. Enable every
   included company in the switcher. Branch accounting currencies and financial
   year boundaries must agree. The preview lists included companies, retains the
@@ -372,3 +367,9 @@ The development test runner temporarily pauses automatic vacuum only in its
 verified local PostgreSQL cluster and restores the original setting on exit.
 This keeps long-lived test fixture transactions quiet while preserving the
 production concurrency check and the real retry-loop regression.
+
+### Automatic scope and no-change results
+
+Selecting an old company proposes its complete branch scope, including archived branches. The server rechecks this when Review my move is clicked. Review the named scope before confirming and enable every included company. Detecting existing destination entries does not approve earlier transfers: the accountant must explicitly identify prior openings and copied documents and confirm the review. New trading activity stays in place.
+
+If all purchase orders were already copied (or none exist), purchase-only review shows **Already up to date**. It creates no new history, opening entry, completed move or archive. Existing saved histories remain available from Purchase.

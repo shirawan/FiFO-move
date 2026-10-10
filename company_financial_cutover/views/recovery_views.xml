@@ -1,6 +1,45 @@
 <odoo>
-<record id="recovery_issue_list" model="ir.ui.view"><field name="name">company.move.recovery.list</field><field name="model">company.financial.recovery.issue</field><field name="arch" type="xml"><list create="0" edit="0" delete="0"><field name="archive_key"/><field name="state"/><field name="reason"/></list></field></record>
-<record id="recovery_issue_form" model="ir.ui.view"><field name="name">company.move.recovery.form</field><field name="model">company.financial.recovery.issue</field><field name="arch" type="xml"><form create="0" edit="0" delete="0"><header><button name="action_retry" type="object" string="Retry recovery" class="oe_highlight" invisible="state != 'pending'"/></header><sheet><h1>Recover a saved company move</h1><p>This archive was kept aside so other saved moves could recover. No balances were reposted and duplicate-prevention markers remain.</p><group><field name="archive_key"/><field name="state"/><field name="reason"/></group><p>Ask your administrator and accountant to restore the missing archive or repair the original records from a verified backup, then click Retry recovery. Recovery still checks the original financial evidence; changed balances cannot be accepted here.</p></sheet></form></field></record>
-<record id="recovery_issue_action" model="ir.actions.act_window"><field name="name">Company move recovery</field><field name="res_model">company.financial.recovery.issue</field><field name="view_mode">list,form</field><field name="domain">[('state', '=', 'pending')]</field></record>
-<menuitem id="recovery_issue_menu" name="Company move recovery" parent="account.menu_finance" action="recovery_issue_action" groups="base.group_system" sequence="99"/>
+    <record id="recovery_issue_list" model="ir.ui.view">
+        <field name="name">company.move.recovery.list</field>
+        <field name="model">company.financial.recovery.issue</field>
+        <field name="arch" type="xml">
+            <list create="0" edit="0" delete="0">
+                <field name="move_description"/>
+                <field name="state"/>
+                <field name="reason"/>
+            </list>
+        </field>
+    </record>
+    <record id="recovery_issue_form" model="ir.ui.view">
+        <field name="name">company.move.recovery.form</field>
+        <field name="model">company.financial.recovery.issue</field>
+        <field name="arch" type="xml">
+            <form create="0" edit="0" delete="0">
+                <header>
+                    <button name="action_retry" type="object" string="Retry recovery" class="oe_highlight" invisible="state != 'pending'"/>
+                </header>
+                <sheet>
+                    <h1>Recover a saved company move</h1>
+                    <p>This archive was kept aside so other saved moves could recover. No balances were reposted and duplicate-prevention markers remain.</p>
+                    <group>
+                        <field name="move_description"/>
+                        <field name="state"/>
+                        <field name="reason"/>
+                    </group>
+                    <p>Ask your administrator and accountant to restore the missing archive or repair the original records from a verified backup, then click Retry recovery. Recovery still checks the original financial evidence; changed balances cannot be accepted here.</p>
+                    <details>
+                        <summary>Administrator reference</summary>
+                        <field name="archive_key"/>
+                    </details>
+                </sheet>
+            </form>
+        </field>
+    </record>
+    <record id="recovery_issue_action" model="ir.actions.act_window">
+        <field name="name">Company move recovery</field>
+        <field name="res_model">company.financial.recovery.issue</field>
+        <field name="view_mode">list,form</field>
+        <field name="domain">[('state', '=', 'pending')]</field>
+    </record>
+    <menuitem id="recovery_issue_menu" name="Company move recovery" parent="account.menu_finance" action="recovery_issue_action" groups="base.group_system" sequence="99"/>
 </odoo>
