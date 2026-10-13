@@ -1,0 +1,5 @@
+<odoo>
+ <record id="rule_document_company" model="ir.rule"><field name="name">Document move enabled companies</field><field name="model_id" ref="model_company_document_cutover"/><field name="domain_force">[('source_company_ids', 'not any', [('id', 'not in', company_ids)]), ('target_company_id', 'in', company_ids)]</field></record>
+ <record id="rule_document_match_company" model="ir.rule"><field name="name">Document match enabled companies</field><field name="model_id" ref="model_company_document_mapping"/><field name="domain_force">[('job_id.source_company_ids', 'not any', [('id', 'not in', company_ids)]), ('job_id.target_company_id', 'in', company_ids)]</field></record>
+ <record id="rule_document_overlap_company" model="ir.rule"><field name="name">Document overlap enabled companies</field><field name="model_id" ref="model_company_document_overlap"/><field name="domain_force">[('job_id.source_company_ids', 'not any', [('id', 'not in', company_ids)]), ('job_id.target_company_id', 'in', company_ids)]</field></record>
+</odoo>

@@ -1,0 +1,4 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_document_job,Document migration jobs,model_company_document_cutover,account.group_account_manager,1,1,1,1
+access_document_match,Document migration matches,model_company_document_mapping,account.group_account_manager,1,1,1,1
+access_document_overlap,Document overlap decisions,model_company_document_overlap,account.group_account_manager,1,1,1,1

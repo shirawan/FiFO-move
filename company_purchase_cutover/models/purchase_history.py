@@ -498,6 +498,10 @@ class PurchaseHistory(models.Model):
             if duplicates else [])
 
     def _replacement_destination_issues(self, vendor):
+        document_link=self.env['ir.config_parameter'].sudo().get_param('company_document_cutover.link.purchase.order.%s.%s' % (self.source_order_res_id,self.company_id.id))
+        document_claim=self.env['ir.config_parameter'].sudo().get_param('company_document_cutover.purchase.source.%s' % self.source_order_res_id)
+        if document_link or document_claim:
+            return ['This original order was transferred by the document mover. Use its native destination order; a second replacement is not allowed.']
         if len(vendor) != 1 or not vendor.active or vendor.company_id not in (self.env["res.company"], self.company_id):
             return []
         origin = "Migrated purchase %s/%s" % (self.source_company_id.id, self.source_order_res_id)

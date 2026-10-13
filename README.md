@@ -1,10 +1,19 @@
+# Test-only document migration candidate
+
+[Download the exact tested 19.0.0.3.0 ZIP](bundles/document-migration-19.0.0.3.0/FiFO-document-candidate-fixes-20261013-abcd7b78.zip).
+The reports describe that ZIP. Repository stock-addon source retains the newer main-branch fixes; see [bundle provenance](bundles/document-migration-19.0.0.3.0/README.md).
+
+Version19.0.0.3.0 fixes invoice overlap detection, purchase billing policy and pending receipt checks, and original invoice payment references. See the guide for pair-specific accountant decisions and remaining limits.
+
+See [MIGRATION-GUIDE.md](MIGRATION-GUIDE.md) and [VALIDATION-REPORT.md](VALIDATION-REPORT.md). New document addons are optional. This candidate is not complete or production-ready.
+
 # FiFO-move
 
 Odoo 19 addons for moving an existing business into a clean replacement company
 in the same database.
 
-- `company_stock_fifo_migration`: Company Stock Cutover 19.0.2.7.7, based on the supplied
-  19.0.2.7.3 addon, with a clearer existing-stock preview. Requires Odoo Enterprise `stock_accountant`,
+- `company_stock_fifo_migration`: Company Stock Cutover 19.0.2.7.4, preserved exactly from the supplied
+  bundle; not installed or tested in this document candidate. Requires Odoo Enterprise `stock_accountant`,
   `product_expiry`, and the separate `company_kit_bom_migration` addon.
 - `company_financial_cutover` 19.0.3.1.0: opening balances and unpaid customer/vendor
   items. Requires Odoo 19 `account`; it does not install Purchase.

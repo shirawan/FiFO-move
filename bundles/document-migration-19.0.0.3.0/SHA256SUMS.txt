@@ -1,0 +1,2 @@
+d7be981824a06cd47c1d113c4685dcbbc4f25a00efd4ffa78de84414ae881282  FiFO-document-candidate-fixes-20261013-abcd7b78.zip
+f42122478de9e2f7d2c652599d94f66662eba6aa1df31aee48d97b57fbdca52a  CANDIDATE-SOURCE-SHA256.json
