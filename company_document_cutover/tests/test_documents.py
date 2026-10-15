@@ -218,7 +218,9 @@ class TestDocumentMigration(FinancialCutoverCase):
         self._target_move(job,move).ref='Edited after migration'
         with self.assertRaisesRegex(UserError,'evidence changed'):job.action_execute()
         again=self._job()
-        with self.assertRaisesRegex(UserError,'evidence changed'):again.action_review()
+        again.action_review();self.assertEqual(again.state,'blocked');self.assertIn('evidence changed',again.report)
+        again.action_execute();self.assertEqual(again.state,'failed')
+        self.assertEqual(self.env['account.move'].search_count([('company_id','=',self.target.id)]),1)
 
     def test_postcutover_reconciliation_is_explicit_dependency(self):
         invoice=self._invoice()
@@ -351,3 +353,238 @@ class TestDocumentMigration(FinancialCutoverCase):
         self.assertFalse(source.payment_reference)
         job=self._job();self._run_job(job)
         self.assertFalse(self._target_move(job,source).payment_reference)
+
+    def test_explicit_existing_invoice_adopted_without_duplicate(self):
+        source=self._document('out_invoice',100);job=self._job()
+        target,_,_=job._copy_move(source);target.name='EARLIER/0099'
+        self._match(job,source,target)
+        before=target.read(['name','date','amount_total','write_date'])[0]
+        self._run_job(job)
+        self.assertEqual(job._stored_link(source)['target'],target.id)
+        self.assertEqual(self.env['account.move'].search_count([('company_id','=',self.target.id)]),1)
+        self.assertEqual(before,target.read(['name','date','amount_total','write_date'])[0])
+        job.action_execute()
+
+    def test_existing_invoice_adoption_rejects_wrong_amount_and_alias(self):
+        source=self._document('out_invoice',100);second=self._document('out_invoice',90);job=self._job()
+        target,_,_=job._copy_move(second)
+        self._match(job,source,target);job.action_review()
+        self.assertEqual(job.state,'blocked');self.assertIn('different',job.report)
+        self._match(job,second,target);job.action_review()
+        self.assertEqual(job.state,'blocked');self.assertIn('only one',job.report)
+
+    def test_adoption_rejects_unrelated_target_reconciliation(self):
+        source=self._document('out_invoice',100);job=self._job();target,_,_=job._copy_move(source)
+        self._match(job,source,target)
+        bank=self.journals[self.target.id]['bank']
+        payment=self.env['account.payment'].with_company(self.target).create({'company_id':self.target.id,
+            'journal_id':bank.id,'date':self.cutoff,'amount':30,'currency_id':self.target.currency_id.id,
+            'partner_id':self.customer.id,'payment_type':'inbound','partner_type':'customer',
+            'payment_method_line_id':bank.inbound_payment_method_line_ids.filtered(lambda m:m.code=='manual').id,
+            'destination_account_id':self.accounts[self.target.id]['receivable'].id})
+        payment.state='paid'
+        (target.line_ids|payment.move_id.line_ids).filtered(lambda l:l.account_id.account_type=='asset_receivable').reconcile()
+        job.action_review();self.assertEqual(job.state,'blocked');self.assertIn('outside',job.report)
+        self.assertEqual(target.amount_residual,70)
+
+    def test_resumable_batches_keep_previous_steps_and_do_not_duplicate(self):
+        sources=self._document('out_invoice',100)|self._document('out_invoice',200)|self._document('out_invoice',300)
+        job=self._job(batch_size=1)
+        for expected in (1,2,3):
+            job.action_review();self.assertEqual(job.state,'ready',job.report)
+            job.action_execute();self.assertEqual(job.state,'done' if expected==3 else 'partial',job.report)
+            self.assertEqual(self.env['account.move'].search_count([('company_id','=',self.target.id)]),expected)
+        self.assertEqual(sum(self.env['account.move'].search([('company_id','=',self.target.id)]).mapped('amount_total')),600)
+        job.action_execute()
+        for source in sources:self.assertTrue(job._stored_link(source))
+
+    def test_batch_keeps_payment_and_invoice_component_together(self):
+        invoice=self._document('out_invoice',100);payment=self._pay(invoice,30)
+        self._document('out_invoice',200);job=self._job(batch_size=1)
+        job.action_review();job.action_execute();self.assertEqual(job.state,'partial',job.report)
+        self.assertTrue(job._stored_link(invoice));self.assertTrue(job._stored_link(payment.move_id))
+        self.assertEqual(self._target_move(job,invoice).amount_residual,70)
+        job.action_review();job.action_execute();self.assertEqual(job.state,'done',job.report)
+
+    def test_incremental_requires_explicit_choice_and_reuses_previous_history(self):
+        old=self._document('out_invoice',100);first=self._job();self._run_job(first)
+        target=self._target_move(first,old);new=self._document('out_invoice',50)
+        job=self._job(allow_incremental=True);self._run_job(job)
+        self.assertEqual(self._target_move(job,old),target)
+        self.assertTrue(job._stored_link(new))
+        self.assertEqual(self.env['account.move'].search_count([('company_id','=',self.target.id)]),2)
+
+    def test_recovery_restores_choices_without_copying_and_skips_damaged_archive(self):
+        self._document('out_invoice',100);job=self._job();self._run_job(job)
+        receipt=job.audit_attachment_id;key=job.recovery_key;matches=len(job.mapping_ids)
+        # Native uninstall removes the custom model table. Delete its synthetic row
+        # directly here; the separate uninstall simulation exercises real removal.
+        self.env.cr.execute('DELETE FROM company_document_mapping WHERE job_id=%s',[job.id])
+        self.env.cr.execute('DELETE FROM company_document_cutover WHERE id=%s',[job.id])
+        self.env.invalidate_all()
+        self.env['ir.config_parameter'].sudo().set_param('company_document_cutover.receipt.broken','{"target":%s}'%self.target.id)
+        self.env['company.document.cutover'].action_restore_saved_moves()
+        restored=self.env['company.document.cutover'].search([('recovery_key','=',key)])
+        self.assertEqual(len(restored),1);self.assertEqual(restored.state,'done')
+        self.assertEqual(restored.audit_attachment_id,receipt);self.assertEqual(len(restored.mapping_ids),matches)
+        restored.action_execute()
+        self.assertEqual(self.env['account.move'].search_count([('company_id','=',self.target.id)]),1)
+
+    def test_analytic_allocation_recreates_native_analytic_lines(self):
+        plan=self.env.ref('analytic.analytic_plan_projects')
+        old=self.env['account.analytic.account'].create({'name':'Old project','company_id':self.source.id,'plan_id':plan.id})
+        new=self.env['account.analytic.account'].create({'name':'New project','company_id':self.target.id,'plan_id':plan.id})
+        move=self._document('out_invoice',100,posted=False)
+        move.invoice_line_ids.analytic_distribution={str(old.id):100};move.action_post()
+        self.assertTrue(move.invoice_line_ids.analytic_line_ids)
+        job=self._job();self._match(job,old,new);self._run_job(job)
+        target=self._target_move(job,move)
+        self.assertEqual(target.invoice_line_ids.analytic_distribution,{str(new.id):100})
+        self.assertEqual(sum(target.invoice_line_ids.analytic_line_ids.mapped('amount')),sum(move.invoice_line_ids.analytic_line_ids.mapped('amount')))
+        target.invoice_line_ids.analytic_line_ids.amount+=1
+        with self.assertRaisesRegex(UserError,'evidence|reference|settings'):job.action_execute()
+
+    def test_fiscal_position_preserved_with_native_posting(self):
+        old,new=[self.env['account.fiscal.position'].create({'name':'Domestic reviewed position','company_id':c.id}) for c in (self.source,self.target)]
+        move=self._document('out_invoice',100,posted=False);move.fiscal_position_id=old;move.action_post()
+        job=self._job();self._match(job,old,new);self._run_job(job)
+        self.assertEqual(self._target_move(job,move).fiscal_position_id,new)
+
+    def test_cash_rounding_preserved_through_native_computation(self):
+        rounding=self.env['account.cash.rounding'].create({'name':'Round to 0.05','rounding':0.05,'strategy':'add_invoice_line'})
+        for company in (self.source,self.target):
+            rounding.with_company(company).write({'profit_account_id':self.accounts[company.id]['revenue'].id,
+                'loss_account_id':self.accounts[company.id]['expense'].id})
+        move=self._document('out_invoice',100.03,posted=False);move.invoice_cash_rounding_id=rounding;move.action_post()
+        job=self._job();self._match(job,rounding,rounding);self._run_job(job)
+        target=self._target_move(job,move)
+        self.assertEqual(target.amount_total,move.amount_total);self.assertEqual(target.invoice_cash_rounding_id,rounding)
+        self.assertTrue(target.line_ids.filtered(lambda l:l.display_type=='rounding'))
+
+    def test_more_than_200_documents_can_be_reviewed_and_moved(self):
+        template=self._document('out_invoice',1,posted=False)
+        copies=self.env['account.move']
+        for _ in range(200):copies |= template.copy()
+        (copies|template).write({'invoice_date':self.cutoff,'date':self.cutoff});(copies|template).action_post();job=self._job(batch_size=1000);self._run_job(job)
+        self.assertEqual(self.env['account.move'].search_count([('company_id','=',self.target.id)]),201)
+
+    def test_native_bank_statement_and_invoice_reconciliation_preserved(self):
+        invoice=self._document('out_invoice',100)
+        statement=self.env['account.bank.statement'].with_company(self.source).create({'name':'Imported June statement','balance_start':50,'balance_end_real':150})
+        line=self.env['account.bank.statement.line'].with_company(self.source).create({
+            'journal_id':self.journals[self.source.id]['bank'].id,'statement_id':statement.id,
+            'date':self.cutoff,'payment_ref':'Historical bank receipt','amount':100,'partner_id':self.customer.id,
+            'counterpart_account_id':self.accounts[self.source.id]['receivable'].id})
+        (invoice.line_ids|line.line_ids).filtered(lambda l:l.account_id==self.accounts[self.source.id]['receivable']).reconcile()
+        job=self._job(batch_size=1);self._run_job(job)
+        target=self._target_move(job,invoice)
+        bank=self._target_move(job,line.move_id).statement_line_id
+        self.assertEqual(target.amount_residual,0);self.assertTrue(bank.is_reconciled)
+        self.assertEqual(bank.amount,100);self.assertEqual(bank.payment_ref,line.payment_ref)
+        self.assertEqual(bank.statement_id.balance_start,50);self.assertEqual(bank.statement_id.balance_end,150)
+        job.action_execute()
+        self.assertEqual(self.env['account.bank.statement.line'].search_count([('company_id','=',self.target.id)]),1)
+
+    def test_foreign_partial_manual_payment_reproduced(self):
+        currency=self.env.ref('base.EUR')
+        if currency==self.source.currency_id:currency=self.env.ref('base.USD')
+        currency.active=True
+        for company in (self.source,self.target):
+            self.env['res.currency.rate'].create({'company_id':company.id,'currency_id':currency.id,'name':self.cutoff,'rate':2})
+        invoice=self._invoice(currency=currency,amount=120);self._pay(invoice,50)
+        job=self._job();self._run_job(job);target=self._target_move(job,invoice)
+        self.assertEqual(target.amount_residual,invoice.amount_residual)
+        self.assertEqual(target.line_ids.filtered(lambda l:l.account_id.account_type=='asset_receivable').amount_residual_currency,70)
+
+    def test_exchange_difference_regenerated_once_by_native_reconciliation(self):
+        currency=self.env.ref('base.EUR')
+        if currency==self.source.currency_id:currency=self.env.ref('base.USD')
+        currency.active=True
+        for company in (self.source,self.target):
+            company.write({'currency_exchange_journal_id':self.journals[company.id]['general'].id,
+                'income_currency_exchange_account_id':self.accounts[company.id]['revenue'].id,
+                'expense_currency_exchange_account_id':self.accounts[company.id]['expense'].id})
+            self.env['res.currency.rate'].create([
+                {'company_id':company.id,'currency_id':currency.id,'name':date(2024,6,1),'rate':2},
+                {'company_id':company.id,'currency_id':currency.id,'name':self.cutoff,'rate':1}])
+        invoice=self._invoice(currency=currency,amount=100,when=date(2024,6,1));self._pay(invoice,100)
+        exchange=(invoice.line_ids.matched_debit_ids|invoice.line_ids.matched_credit_ids).exchange_move_id
+        self.assertTrue(exchange,'Fixture must actually create a native exchange difference')
+        job=self._job(batch_size=1);self._run_job(job)
+        target=self._target_move(job,invoice);self.assertEqual(target.amount_residual,0)
+        self.assertEqual(len(self.env['account.move'].search([('company_id','=',self.target.id)])),3)
+        self.assertTrue(job._stored_link(exchange));job.action_execute()
+
+    def test_cash_basis_entry_regenerated_once_by_native_reconciliation(self):
+        taxes={}
+        for company in (self.source,self.target):
+            company.write({'tax_exigibility':True,'tax_cash_basis_journal_id':self.journals[company.id]['general'].id,
+                'account_cash_basis_base_account_id':self.accounts[company.id]['clearing'].id})
+            transition=self.accounts[company.id]['clearing'];transition.reconcile=True
+            group=self.env['account.tax.group'].create({'name':'Cash basis VAT','company_id':company.id})
+            taxes[company.id]=self.env['account.tax'].with_company(company).create({'name':'Cash VAT 10','amount':10,
+                'amount_type':'percent','type_tax_use':'sale','company_id':company.id,'tax_group_id':group.id,
+                'tax_exigibility':'on_payment','cash_basis_transition_account_id':transition.id})
+            taxes[company.id].invoice_repartition_line_ids.filtered(lambda l:l.repartition_type=='tax').account_id=self.accounts[company.id]['payable']
+            taxes[company.id].refund_repartition_line_ids.filtered(lambda l:l.repartition_type=='tax').account_id=self.accounts[company.id]['payable']
+        invoice=self._invoice(amount=100,taxes=taxes[self.source.id]);self._pay(invoice,55)
+        cash=self.env['account.move'].search([('company_id','=',self.source.id),('tax_cash_basis_rec_id','!=',False)])
+        self.assertTrue(cash,'Fixture must create native cash-basis entries')
+        job=self._job(batch_size=1);self._match(job,taxes[self.source.id],taxes[self.target.id]);self._run_job(job)
+        self.assertEqual(self._target_move(job,invoice).amount_residual,55)
+        self.assertEqual(self.env['account.move'].search_count([('company_id','=',self.target.id),('tax_cash_basis_rec_id','!=',False)]),len(cash))
+        for move in cash:self.assertTrue(job._stored_link(move))
+        job.action_execute()
+
+    def test_setup_suggestions_never_match_company_contacts_on_name_only(self):
+        source=self.env['res.partner'].create({'name':'Same-name person','company_id':self.source.id})
+        duplicate=self.env['res.partner'].create({'name':source.name,'company_id':self.target.id})
+        source.with_company(self.source).property_account_receivable_id=self.accounts[self.source.id]['receivable']
+        invoice=self._document('out_invoice',100,posted=False);invoice.partner_id=source;invoice.action_post()
+        job=self._job();job.mapping_ids.unlink();job.action_find_setup_matches()
+        self.assertTrue(job.mapping_ids.filtered(lambda r:r.model_name=='account.account'))
+        self.assertFalse(job.mapping_ids.filtered(lambda r:r.model_name=='res.partner' and r.source_id==source.id))
+        self.assertTrue(duplicate)
+
+    def test_failed_later_step_retains_earlier_committed_records(self):
+        first=self._document('out_invoice',100);second=self._document('out_invoice',200)
+        job=self._job(batch_size=1);job.action_review();job.action_execute()
+        self.assertEqual(job.state,'partial',job.report);saved=job._stored_link(first)['target']
+        job.action_review();second.ref='Changed after review';job.action_execute()
+        self.assertEqual(job.state,'failed');self.assertEqual(job._stored_link(first)['target'],saved)
+        self.assertEqual(self.env['account.move'].search_count([('company_id','=',self.target.id)]),1)
+        job.action_review();job.action_execute();self.assertEqual(job.state,'done',job.report)
+        self.assertEqual(self.env['account.move'].search_count([('company_id','=',self.target.id)]),2)
+
+    def test_reconciliation_evidence_catches_changed_matching_date(self):
+        invoice=self._document('out_invoice',100);self._pay(invoice,30)
+        job=self._job();self._run_job(job)
+        target=self._target_move(job,invoice)
+        partial=target.line_ids.matched_credit_ids
+        partial.max_date=date(2024,6,29)
+        with self.assertRaisesRegex(UserError,'evidence|reconciliation'):job.action_execute()
+
+    def test_unrelated_target_change_after_review_invalidates_reuse(self):
+        source=self._document('out_invoice',100);job=self._job();target,_,_=job._copy_move(source)
+        self._match(job,source,target);job.action_review();self.assertEqual(job.state,'ready',job.report)
+        target.ref='Changed in target after preview'
+        job.action_execute();self.assertEqual(job.state,'failed')
+        self.assertEqual(self.env['account.move'].search_count([('company_id','=',self.target.id)]),1)
+
+    def test_existing_payment_and_invoice_adopt_native_graph_once(self):
+        invoice=self._document('out_invoice',100);payment=self._pay(invoice,30);job=self._job()
+        target,_,_=job._copy_move(invoice);bank,_,native=job._copy_move(payment.move_id)
+        (target.line_ids|bank.line_ids).filtered(lambda l:l.account_id.account_type=='asset_receivable').reconcile()
+        self._match(job,invoice,target);self._match(job,payment.move_id,bank)
+        self._run_job(job)
+        self.assertEqual(native.invoice_ids,target);self.assertEqual(target.amount_residual,70)
+        self.assertEqual(self.env['account.payment'].search_count([('company_id','=',self.target.id)]),1)
+        self.assertEqual(self.env['account.move'].search_count([('company_id','=',self.target.id)]),2)
+        self.assertTrue(job._stored_link(invoice)['adopted_existing']);job.action_execute()
+
+    def test_corrupt_adoption_claim_is_combined_review_finding(self):
+        source=self._document('out_invoice',100);job=self._job();target,_,_=job._copy_move(source)
+        self._match(job,source,target)
+        self.env['ir.config_parameter'].sudo().set_param('company_document_cutover.link.account.move.invalid','damaged')
+        job.action_review();self.assertEqual(job.state,'blocked');self.assertIn('ownership evidence is damaged',job.report)
+        self.assertEqual(self.env['account.move'].search_count([('company_id','=',self.target.id)]),1)

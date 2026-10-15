@@ -33,9 +33,15 @@ class TestPurchaseDocuments(FinancialCutoverCase):
         self._match(job,old,new)
         return job
 
-    def _receive(self,po,qty):
+    def _receive(self,po,qty,lot=False,owner=False,package=False):
         move=po.picking_ids.move_ids.filtered(lambda m:m.state not in ('done','cancel'))[:1]
         move.quantity=qty
+        if lot:
+            move.move_line_ids.lot_id=lot
+        if owner:
+            move.move_line_ids.owner_id=owner
+        if package:
+            move.move_line_ids.result_package_id=package
         move.picked=True
         move._action_done(cancel_backorder=False)
         return po.order_line.move_ids.filtered(lambda m:m.state=='done')
@@ -114,15 +120,21 @@ class TestPurchaseDocuments(FinancialCutoverCase):
         job=self._job();self._match(job,old,new);job.action_review()
         self.assertEqual(job.state,'blocked');self.assertIn('Bill/PO line links',job.report)
 
-    def _history_fixture(self, returned=False):
-        old,new=self._products();source=self._po(old,10,True)
+    def _history_fixture(self, returned=False, tracked=False, owned=False, packaged=False):
+        old,new=self._products()
+        lots=[]
+        if tracked:
+            (old|new).tracking='serial' if tracked=='serial' else 'lot'
+            lots=[self.env['stock.lot'].create({'name':'LOT-ORIGINAL-123','product_id':product.id,'company_id':product.company_id.id}) for product in (old,new)]
+        packages=[self.env['stock.package'].create({'name':'PACK-OLD'}),self.env['stock.package'].create({'name':'PACK-NEW'})] if packaged else []
+        source=self._po(old,10,True)
         target=self.env['purchase.order'].with_company(self.target).create({
             'company_id':self.target.id,'partner_id':self.vendor.id,'date_order':source.date_order,
             'order_line':[Command.create({'product_id':new.id,'name':source.order_line.name,
                 'product_qty':10,'product_uom_id':new.uom_id.id,'price_unit':20,'discount':5,
                 'date_planned':source.order_line.date_planned,'tax_ids':[Command.clear()]})]})
         target.button_confirm();target.write({'date_order':source.date_order,'date_approve':source.date_approve})
-        a=self._receive(source,4);b=self._receive(target,4)
+        a=self._receive(source,1 if tracked=='serial' else 4,lots[0] if lots else False,self.vendor if owned else False,packages[0] if packages else False);b=self._receive(target,1 if tracked=='serial' else 4,lots[1] if lots else False,self.vendor if owned else False,packages[1] if packages else False)
         a.date=datetime(2024,6,29);b.date=a.date
         pairs=[(a,b)]
         if returned:
@@ -137,6 +149,13 @@ class TestPurchaseDocuments(FinancialCutoverCase):
         job=self._purchase_job(old,new)
         self._match(job,source,target);self._match(job,source.order_line,target.order_line)
         for a,b in pairs:self._match(job,a,b)
+        if tracked:
+            self._match(job,*lots)
+        if packaged:
+            self._match(job,*packages)
+        if tracked or owned or packaged:
+            for old_location,new_location in [(a.location_id,b.location_id),(a.location_dest_id,b.location_dest_id)]:
+                self._match(job,old_location,new_location)
         return source,target,job
 
     def test_existing_receipts_returns_reused_without_stock_or_po_creation(self):
@@ -364,3 +383,57 @@ class TestPurchaseDocuments(FinancialCutoverCase):
         wrong=self.env['product.product'].with_company(self.target).create({'name':'Wrong pending goods','company_id':self.target.id,'type':'consu'})
         target.order_line.move_ids.product_id=wrong
         with self.assertRaisesRegex(UserError,'pending receipt'):job.action_execute()
+
+    def test_purchase_steps_resume_without_duplicate_commitments(self):
+        old,new=self._products();sources=self._po(old,3)|self._po(old,4)|self._po(old,5)
+        job=self._purchase_job(old,new,batch_size=1)
+        for expected in (1,2,3):
+            job.action_review();self.assertEqual(job.state,'ready',job.report)
+            job.action_execute();self.assertEqual(job.state,'done' if expected==3 else 'partial',job.report)
+            self.assertEqual(self.env['purchase.order'].search_count([('company_id','=',self.target.id)]),expected)
+        for order in sources:self.assertTrue(job._stored_link(order))
+
+    def test_existing_bill_adopted_into_matched_history_without_copy(self):
+        source,target,job=self._history_fixture();bill=self._bill(source,2);job.include_accounting=True
+        dest,_,_=job._copy_move(bill);self._match(job,bill,dest)
+        self._run_job(job)
+        self.assertEqual(target.order_line.qty_invoiced,2)
+        self.assertEqual(len(target.invoice_ids),1);self.assertEqual(job._stored_link(bill)['target'],dest.id)
+
+    def test_existing_lot_receipts_reused_with_exact_native_details(self):
+        source,target,job=self._history_fixture(tracked=True)
+        before=self.env['stock.quant'].search([('company_id','=',self.target.id)]).read(['quantity','lot_id','location_id','write_date'])
+        self._run_job(job)
+        self.assertEqual(target.order_line.qty_received,4)
+        self.assertEqual(before,self.env['stock.quant'].search([('company_id','=',self.target.id)]).read(['quantity','lot_id','location_id','write_date']))
+        job.action_execute()
+
+    def test_lot_identity_mismatch_blocks_reuse(self):
+        source,target,job=self._history_fixture(tracked=True)
+        target.order_line.move_ids.move_line_ids.lot_id.name='DIFFERENT-LOT'
+        job.action_review();self.assertEqual(job.state,'blocked');self.assertIn('lot/serial number',job.report)
+
+    def test_more_than_200_purchase_orders_moved_in_steps(self):
+        old,new=self._products()
+        for _ in range(201):self._po(old,1)
+        job=self._purchase_job(old,new,batch_size=1000);self._run_job(job)
+        self.assertEqual(self.env['purchase.order'].search_count([('company_id','=',self.target.id)]),201)
+
+    def test_serial_receipt_reused_without_moving_inventory(self):
+        source,target,job=self._history_fixture(tracked='serial')
+        self._run_job(job);self.assertEqual(target.order_line.qty_received,1)
+        self.assertEqual(target.order_line.move_ids.move_line_ids.lot_id.name,'LOT-ORIGINAL-123')
+
+    def test_owner_and_package_receipt_history_reused(self):
+        source,target,job=self._history_fixture(owned=True,packaged=True)
+        before=self.env['stock.quant'].search([('company_id','=',self.target.id)]).read(['quantity','owner_id','package_id','write_date'])
+        self._run_job(job)
+        self.assertEqual(before,self.env['stock.quant'].search([('company_id','=',self.target.id)]).read(['quantity','owner_id','package_id','write_date']))
+        self.assertEqual(target.order_line.move_ids.move_line_ids.owner_id,self.vendor)
+
+    def test_accounting_only_incremental_verifies_existing_linked_bill(self):
+        source,target,job=self._history_fixture();self._bill(source,2);job.include_accounting=True;self._run_job(job)
+        TestDocumentMigration._document(self,'out_invoice',50)
+        again=self._job(allow_incremental=True);self._match(again,source.order_line.product_id,target.order_line.product_id)
+        self._run_job(again)
+        self.assertEqual(len(target.invoice_ids),1);self.assertEqual(target.order_line.qty_invoiced,2)

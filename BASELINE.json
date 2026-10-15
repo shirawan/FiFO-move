@@ -50,5 +50,8 @@
     "company_stock_fifo_migration/tests/test_whole_warehouse_ui.py": "f32bdc164e3cd7a0fba5ad92c3b17e4db6b5918b54672e0b8dd4081dd7ace947",
     "company_stock_fifo_migration/views/migration_views.xml": "38ee3dbfd182d3da139aa45ca7d1c69513f9d0a650928b8080737deb883d55c4",
     "company_stock_fifo_migration/views/warehouse_cutover_views.xml": "29f4bc9fbc7d7f7755f75d764e303dfc95018bc455c5b160626bc28316c13e38"
-  }
+  },
+  "candidate_document_version": "19.0.0.4.0",
+  "candidate_financial_version": "19.0.3.1.1",
+  "stock_policy": "Exact original supplied stock source; not executed. Repository keeps newer stock source."
 }

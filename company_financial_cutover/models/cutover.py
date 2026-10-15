@@ -664,6 +664,8 @@ class FinancialCutover(models.Model):
         cursor and cannot have been concurrently changed. Table locks keep the
         fresh committed view stable until the cutover transaction completes.
         """
+        self.env.cr.execute("SELECT txid_current() % 4294967296")
+        own_xid = self.env.cr.fetchone()[0]
         with self.env.registry.cursor() as fresh:
             fresh.execute("SELECT txid_snapshot_xmax(txid_current_snapshot())")
             anchor = fresh.fetchone()[0]
@@ -676,8 +678,11 @@ class FinancialCutover(models.Model):
                 anchor % 4294967296, anchor % 4294967296)
             for table in self._lock_tables():
                 name = SQL.identifier(table)
+                # Only committed versions can come from another transaction.
+                # This also excludes own subtransactions on Odoo's shared test cursor.
                 fresh.execute(SQL("SELECT EXISTS (SELECT 1 FROM %s WHERE xmin::text::bigint >= 3 "
-                    "AND NOT txid_visible_in_snapshot(%s, %s::txid_snapshot))", name, xid, snapshot))
+                    "AND xmin::text::bigint <> %s AND txid_status(%s) = 'committed' "
+                    "AND NOT txid_visible_in_snapshot(%s, %s::txid_snapshot))", name, own_xid, xid, xid, snapshot))
                 if fresh.fetchone()[0]:
                     raise ConcurrencyError("Migration data changed before cutover locks; retry the full request.")
                 self.env.cr.execute(SQL("SELECT ctid::text, xmin::text FROM %s "

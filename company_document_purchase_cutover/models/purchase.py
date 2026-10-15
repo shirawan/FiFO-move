@@ -6,7 +6,7 @@ from odoo.addons.company_document_cutover.models.migration import digest
 
 class PurchaseDocumentJob(models.Model):
     _inherit = 'company.document.cutover'
-    include_purchase = fields.Boolean(string='Purchase orders and remaining commitments')
+    include_purchase = fields.Boolean(string='Purchase orders')
 
     def _operator(self):
         super()._operator()
@@ -50,11 +50,13 @@ class PurchaseDocumentJob(models.Model):
         if not self.old_operations_frozen:
             issues.append('Confirm old-company fulfilment will stop before activating new PO commitments.')
         orders = self.env['purchase.order'].search([('company_id', 'in', self.source_company_ids.ids),
-            ('date_order', '<=', str(self.cutover_date) + ' 23:59:59')], order='id', limit=201)
-        if len(orders) > 200:
-            issues.append('Purchase histories larger than 200 orders per atomic job are not implemented.')
+            ('date_order', '<=', str(self.cutover_date) + ' 23:59:59')], order='id', limit=self.record_limit + 1)
+        if len(orders) > self.record_limit:
+            issues.append('Purchase history exceeds Maximum records to review. Increase the limit after a restored-copy timing check.')
         info = []
         for order in orders:
+            if any(m.date.date() > self.cutover_date for m in order.order_line.move_ids if m.state == 'done'):
+                issues.append('PO %s: Receipt/return falls after the cutover date; include its full history.' % order.name)
             rows = [{'line': line.id, 'description':line.name, 'unit':line.product_uom_id.display_name, 'ordered': line.product_qty, 'received': line.qty_received,
                 'billed': line.qty_invoiced, 'remaining_delivery': line.product_qty - line.qty_received,
                 'remaining_billing': line.product_qty - line.qty_invoiced,
@@ -110,7 +112,8 @@ class PurchaseDocumentJob(models.Model):
         super()._extra_execute(extra, audit)
         if not self.include_purchase:
             return
-        for row in extra['orders']:
+        pending = [row for row in extra['orders'] if not self._stored_link(self.env['purchase.order'].browse(row['source']))]
+        for row in pending[:self.batch_size]:
             source = self.env['purchase.order'].browse(row['source'])
             stored = self._stored_link(source)
             if stored:
@@ -167,6 +170,16 @@ class PurchaseDocumentJob(models.Model):
                 raise UserError('No historical or real delivery may be created by this migration.')
             audit['links'].append(self._save_link(source, target, line_map))
             self.env['ir.config_parameter'].sudo().set_param('company_document_cutover.purchase.source.%s' % source.id,str(self.target_company_id.id))
+
+    def _remaining_extra(self, extra):
+        return sum(not bool(self._stored_link(self.env['purchase.order'].browse(r['source']))) for r in extra.get('orders', []))
+
+    def _recovery_links(self, moves, extra):
+        result = super()._recovery_links(moves, extra)
+        for row in extra.get('orders', []):
+            if data := self._stored_link(self.env['purchase.order'].browse(row['source'])):
+                result.append(data)
+        return result
 
     def _stored_link(self, record):
         data = super()._stored_link(record)
@@ -293,12 +306,9 @@ class PurchaseDocumentJob(models.Model):
                     for history in (move, dest):
                         if self.env['product.value'].search_count([('move_id', '=', history.id)]):
                             raise UserError('Manual receipt valuation adjustments need additional history mapping.')
-                        details = history.move_line_ids
-                        if (history.product_id.tracking != 'none' or details.lot_id or details.owner_id or
-                                details.package_id or details.result_package_id):
-                            raise UserError('Tracked lots/serials, owners or packages need additional history mappings; this candidate supports ordinary untracked goods only.')
                         if getattr(history, 'account_move_id', False):
                             raise UserError('Stock valuation journal entries require separate accounting-history mapping; do not duplicate existing valuation balances.')
+                    self._verify_tracked_receipt(move, dest)
                     if dest in mapped:
                         raise UserError('Two receipts/returns cannot use the same destination movement.')
                     mapped |= dest
@@ -328,8 +338,9 @@ class PurchaseDocumentJob(models.Model):
                     errors.append('PO %s has cancelled bill history; explicit accounting-history adoption is not implemented.' % order.name)
                     continue
                 stored = self._stored_link(bill_line.move_id)
-                if stored:
-                    dest_line = self.env['account.move.line'].browse(stored['line_map'][str(bill_line.id)])
+                adopted, adopted_lines = self._adoption(bill_line.move_id) if not stored else (False, {})
+                if stored or adopted:
+                    dest_line = self.env['account.move.line'].browse((stored['line_map'] if stored else adopted_lines)[str(bill_line.id)])
                     if dest_line.purchase_line_id != new:
                         errors.append('Saved bill is not linked to its selected destination PO line.')
                     represented |= dest_line
@@ -348,6 +359,21 @@ class PurchaseDocumentJob(models.Model):
 
     def _check_purchase_line(self, line, all_moves):
         if not self.include_purchase:
+            stored = self._stored_link(line.move_id)
+            if stored:
+                # Accounting-only continuation may verify an earlier linked bill.
+                # Its original PO is not copied or made operational again.
+                import json
+                raw = self.env['ir.config_parameter'].sudo().get_param(self._key(line.purchase_line_id.order_id))
+                try:
+                    purchase = json.loads(raw or '{}')
+                    new = self.env['account.move.line'].browse(stored['line_map'][str(line.id)])
+                    if (new.purchase_line_id.id == purchase.get('line_map', {}).get(str(line.purchase_line_id.id)) and
+                            new.purchase_line_id.order_id.id == purchase.get('target') and
+                            new.company_id == self.target_company_id):
+                        return
+                except (KeyError, TypeError, ValueError):
+                    pass
             return super()._check_purchase_line(line, all_moves)
         order = line.purchase_line_id.order_id
         if order.company_id not in self.source_company_ids or order.date_order.date() > self.cutover_date:

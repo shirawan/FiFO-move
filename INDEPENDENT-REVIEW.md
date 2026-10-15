@@ -1,3 +1,7 @@
+# Historical review only — 19.0.0.3.0
+
+This prior independent review does not cover version 19.0.0.4.0. See VALIDATION-REPORT.md for the current executed checks.
+
 # Independent candidate challenge review
 
 Reviewer role: separate read-only agent. No candidate source was edited or Git pushed.

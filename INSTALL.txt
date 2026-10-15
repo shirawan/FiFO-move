@@ -1,7 +1,10 @@
-TEST-ONLY DOCUMENT CANDIDATE 19.0.0.3.0
+TEST-ONLY DOCUMENT CANDIDATE 19.0.0.4.0
 Use a restored/disposable database. Read MIGRATION-GUIDE.md and VALIDATION-REPORT.md first.
 Accounting documents: company_document_cutover. Optional purchase documents/history: company_document_purchase_cutover.
 Received/billed POs require verified existing destination PO/receipt/return matches.
+Use explicit Existing accounting document matches to reuse earlier copies.
+Each confirmation saves one step; Review again to continue until Completed.
+New saved moves and choices recover automatically after reinstall; damaged receipts are isolated.
 Bills link natively; missing stock history stays blocked. The supplied stock addon is unchanged and untested.
 
 FiFO-move for Odoo 19

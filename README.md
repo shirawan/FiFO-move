@@ -1,11 +1,15 @@
-# Test-only document migration candidate
+# Company document migration — test candidate 19.0.0.4.0
 
-[Download the exact tested 19.0.0.3.0 ZIP](bundles/document-migration-19.0.0.3.0/FiFO-document-candidate-fixes-20261013-abcd7b78.zip).
-The reports describe that ZIP. Repository stock-addon source retains the newer main-branch fixes; see [bundle provenance](bundles/document-migration-19.0.0.3.0/README.md).
+[Latest bundle and checksums](bundles/document-migration-19.0.0.4.0/).
 
-Version19.0.0.3.0 fixes invoice overlap detection, purchase billing policy and pending receipt checks, and original invoice payment references. See the guide for pair-specific accountant decisions and remaining limits.
+Adds verified reuse of existing invoices/payments, resumable accounting/PO steps, automatic
+saved-choice recovery, bank statements, native exchange/cash-basis entry matching, analytic /
+fiscal-position / cash-rounding support, and existing tracked receipt matching.
 
-See [MIGRATION-GUIDE.md](MIGRATION-GUIDE.md) and [VALIDATION-REPORT.md](VALIDATION-REPORT.md). New document addons are optional. This candidate is not complete or production-ready.
+Read [MIGRATION-GUIDE.md](MIGRATION-GUIDE.md) and [VALIDATION-REPORT.md](VALIDATION-REPORT.md).
+Use a restored database first. Missing stock-history reconstruction and provider/EDI/custom
+localization cases still need separate work. The bundle's stock source remains original;
+repository stock source retains its newer main-branch fixes.
 
 # FiFO-move
 
@@ -15,7 +19,7 @@ in the same database.
 - `company_stock_fifo_migration`: Company Stock Cutover 19.0.2.7.4, preserved exactly from the supplied
   bundle; not installed or tested in this document candidate. Requires Odoo Enterprise `stock_accountant`,
   `product_expiry`, and the separate `company_kit_bom_migration` addon.
-- `company_financial_cutover` 19.0.3.1.0: opening balances and unpaid customer/vendor
+- `company_financial_cutover` 19.0.3.1.1: opening balances and unpaid customer/vendor
   items. Requires Odoo 19 `account`; it does not install Purchase.
 - `company_purchase_cutover` 19.0.3.1.0: optional purchase history and replacement
   drafts. Requires the financial addon and Odoo's Purchase app. Install this addon
@@ -138,3 +142,13 @@ committed checkout. The full bundle includes all addon folders, top-level README
 INSTALL.txt, tests and tools; runtime databases, credentials and caches are excluded.
 
 The move screen uses **Choose → Review → Confirm**. **Review my move** detects old branches and existing destination accounting, collects required decisions and prepares the preview. Existing transfers still require explicit accountant review. Purchase managers can copy history alone from Purchase configuration. Already-copied purchase history returns a successful no-change result; the post-go-live queue shows only orders with remaining work.
+
+
+## Document migration validation
+
+`bash tools/test_documents.sh` creates a fresh local native-test database. To run the real
+browser tests afterwards, install the optional pinned runtime dependency with
+`uv pip install --python /workspace/.fifo-env/venv/bin/python websocket-client==1.8.0`, ensure
+Chromium is available, then run `bash tools/test_document_ui.sh fifo_doc_repeat_...` using
+the disposable database printed by the native runner. Desktop and phone tests must both
+finish; the browser runner rejects skipped tests. Each run retains logs and screenshots.

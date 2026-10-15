@@ -1,183 +1,138 @@
-# Original accounting and purchase document migration — test candidate
+# Move original company documents — test candidate 19.0.0.4.0
 
-This candidate is separate from the original supplied ZIP and from Git main. Do not
-install it on production. It does not yet fulfill every requested document/history case.
-The original opening-balance mover remains available, but is not full document migration.
+Use a restored database first. This moves accounting and purchase history for the same
+legal entity and tax registration, including A with branches B/C into a standalone new A.
+The new company may already contain trading and verified earlier copies.
 
-## Provenance
+## Choose the right method
 
-Supplied package: FiFO-move-odoo19-f0f98f5.zip; SHA256
-4e27269b39fa2ad0fb215cfdc52f870e250fb228455a17be6fd8c78b6d0d8d15.
-Supplied financial version19.0.1.1.1, stock19.0.2.7.4; no supplied purchase addon.
-Candidate incorporates prior reviewed financial/purchase fixes from882b60b, then adds
-company_document_cutover19.0.0.3.0 and optional company_document_purchase_cutover19.0.0.3.0.
-The stock module is preserved exactly as supplied, not installed/executed/tested here.
-Original package, baseline per-file hashes, candidate per-file hashes and exact-source
-patch accompany the deliverables. No Git push, merge or production deployment occurred.
+The optional `company_document_cutover` addon replays original accounting history through
+an inclusive cutover date. It includes original opening/closing journal entries and creates
+no second opening balance. The older financial opening-balance mover is a separate method;
+do not place full history on top of a previously transferred opening.
 
-## Choose the method with your accountant
+Install `company_document_purchase_cutover` only when purchase documents are required.
+Accounting-only installation does not install Purchase. Both document addons are version
+19.0.0.4.0; the financial dependency is 19.0.3.1.1.
 
-This document candidate replays ALL original posted accounting through the inclusive
-cutover date, including historical invoices, bills, credit notes, journal-backed manual
-payments and original opening/closing journal entries. It copies covered draft invoices
-as drafts. It does not add another opening at the cutover date. Thus old revenue, expense,
-tax and receivables/payables are represented once. Historical P&L remains historical;
-prior-year results are not separately folded into a new retained-earnings amount.
-A shortened history window plus H-1 opening is NOT IMPLEMENTED.
+## The workflow
 
-Same legal entity/tax registration is confirmed by the user, and must be attested on each
-job. Different company accounting currencies, root legal tax/fiscal configurations and
-unsafe mapping stop execution. Root companies require all their branches included/enabled;
-branch legal checks use parent settings. New company is standalone and can already trade.
-Unrelated new-company activity stays intact. Identical unmarked earlier copies need an
-accountant decision; adopting existing documents/overlap reversals is NOT IMPLEMENTED in
-this new replay path. Earlier opening-balance migration prevents adding history on top.
-The older financial mover's separate reviewed existing-data workflow remains distinct.
+1. Enable every old company/branch and the new company in the company switcher. Open
+   **Original document moves**, select the companies and cutover date, then choose
+   accounting history, purchase orders, or both.
+2. Ask the accountant to verify the legal entity and review earlier transfers. For purchase
+   commitments, stop old-company fulfilment before using the new commitments.
+3. Use **Find setup matches** for unambiguous accounts, journals and other settings.
+   Contacts use tax ID/reference or the exact shared record; names alone never merge contacts.
+   Review the proposed settings and fill unresolved matches by record name.
+4. Select **Review my documents**. The screen lists choices together, counts, account balances,
+   purchase quantities and existing history. Resolve the list, then review again.
+5. Select **Confirm document move** in the maintenance window. Each confirmation saves a
+   durable step. If **Next step** appears, review and confirm the following step. Only
+   **Result / Completed** means the selected accounting and purchase coverage has finished.
 
-## Install on a restored/disposable copy
+The phone layout keeps the primary Review/Confirm action visible. Desktop and phone
+browser tests exercise the actual review and confirmation buttons.
 
-For accounting documents only, install Company Accounting Document Migration — Candidate.
-It depends on the financial addon and does not install Purchase. For purchase documents,
-add Company Purchase Document Migration — Candidate; this optional bridge installs
-Purchase/Inventory relationships. Installing a module is not executing stock migration.
-Settings and Accounting administrator permissions are required; Purchase manager is also
-required for purchase commitments. Enable every selected source/branch and destination.
+## Records already in the new company
 
-Use Original document moves (candidate): choose source companies, destination, cutover,
-accounting/purchase selections and confirmations. In the accountant details choose the
-old and new records by name: accounts, journals, taxes, contacts, products and payment terms.
-No name-only contact identification is inferred. Shared records can be explicitly reused.
-Company-owned records must map to accessible destination records. Tax IDs, tax configuration,
-repartition accounts/tags, account types/currency and product units must agree.
+Select the old and existing new document under **Explicit accounts, taxes and document
+matches**, using **Existing accounting document**. The mover checks native company, date,
+state, journal, currency, partner, payment terms/reference, invoice details, ledger amounts,
+taxes, analytics and reconciliation. Matching documents are reused without posting a second
+copy. Original numbering and reference differences may remain in the existing document.
+Other material differences require accountant review; no totals or dates are forced to fit.
 
-Use Review my documents. It reports all found decisions, counts/states, account totals and
-purchase ordered/received/billed/remaining quantities in one review. Confirm only after a
-fresh review during an agreed maintenance window. Execution locks the relevant tables,
-checks the transaction snapshot and recomputes the exact review digest. Native accounting
-posting and reconciliation remain authoritative; no amount is forced and no lock is bypassed.
+Existing payments must retain their native payment record. Their reconciliations and
+invoice links must correspond to the selected source history; unrelated destination payments
+cannot be absorbed. Missing covered reconciliation/invoice links are established natively.
+Vendor bills may be adopted into an explicitly matched historical PO when their native bill
+lines already link to the correct destination PO lines.
 
-Destination uses its own numbering. The private audit keeps exact source number, label,
-reference, native document/line mapping and fingerprints. Native ref, invoice origin, dates,
-line quantities/prices/discounts/taxes, due dates and supported residuals are preserved.
-Locked dates block rather than being silently moved into a different period.
+Similarity warnings also catch renumbered invoices, using commercial invoice date, partner,
+currency, amount and commercial line content. If two similar documents are separate real
+transactions, record that exact pair and an accountant reason under **Separate transactions**.
+This is a human decision; similarity cannot identify arbitrarily altered imports or clean up
+all duplicate business transactions inside the old ledger.
 
-## Supported payment/PO cases and explicit dependencies
+## Larger histories and safe continuation
 
-Payments are manual accounting evidence only; no provider/token/payment transaction is
-created. Covered native journal-backed manual payment relationships and reproducible native
-partial/full reconciliations are carried. Cash-basis tax, exchange-difference reconciliation,
-bank statements, internal/provider payments, analytic allocation, fiscal-position/cash-rounding
-and EDI history are BLOCKED. Foreign invoices must reproduce native accounting amounts at
-destination rates; discrepancies rollback. Foreign partial payments are NOT SEPARATELY TESTED.
-Reconciliations reaching after cutover are BLOCKED; historical residual reconstruction is
-NOT IMPLEMENTED. Payment terms whose schedules recompute differently also rollback.
+The default step target is 100 records. In the accountant's step-size section, choose
+1–1,000 records per step and a review limit up to 50,000 (default 10,000). These are bounds,
+not production-size performance guarantees. Connected invoices, credits, payments,
+exchange/cash-basis entries and complete bank statements stay together, so a connected
+group can exceed the target step size. Time such groups on your restored database.
 
-Draft/sent RFQs, cancelled untouched POs and unreceived/unbilled confirmed POs can copy
-natively. Confirmed copies have pending receipt commitments, never completed receipts.
-Destination-specific products protect source/shared supplier records from native confirmation
-side effects. Source POs stay unchanged: freeze old fulfilment operationally before using new
-commitments. Cross-workflow source ownership prevents the older replacement-draft flow from
-activating a second order.
+Purchase orders are processed in steps after the accounting coverage is present. Every step
+uses native posting and maintenance locks. If a later step fails, only that step rolls back;
+previous successful steps remain. Retrying reuses their durable links. Keep the new ledger
+out of operational use until the chosen migration reaches Completed and is reconciled.
 
-Historical orders can now reuse an explicitly selected existing destination PO, its lines,
-and completed receipts/returns. Every line and completed movement must have one exact match;
-extra/missing movements, different quantities, terms, dates, return origins, values, pending
-commitments or lock state stop the review. This includes partially and fully received/billed
-orders and locked completed orders. No new PO or delivery commitment is created for adopted
-history. Select these matches in the accountant details: Existing purchase order, Existing
-purchase order line, Completed receipt or return. Missing matches are listed together.
+For additional independent source documents, explicitly choose **Include additional history**.
+The destination must stay the same, the cutover date cannot move backwards, and previously
+moved source documents must remain present. This does not rebaseline edited invoices,
+changed source payments, or destination history that changed after go-live. Those cases need
+an accountant reconciliation plan. Accounting-only continuation can verify previously linked
+bills without copying purchase commitments again.
 
-Choose Accounting as well when linked bills/credits have not already been transferred.
-Copied bills and vendor credits link to the existing destination PO lines during native
-posting. The final received, billed and billable quantities must agree. Existing unmarked
-bill lines block adoption: they need a separate overlap decision, not another copied bill.
-The adapter does not adopt arbitrary unmarked existing invoices or payments.
+## Accounting coverage added in this version
 
-For example, 10 ordered, 4 received and 1 returned means net received3. If two bills total3
-units and a credit returns1 billed unit, net billed2 and currently billable1. The existing
-open incoming delivery can still be6: a return does not itself create a replacement receipt.
-The review shows actual pending receipt commitments and currently billable quantity alongside
-ordered-minus-net-received/billed totals. It preserves that native workflow distinction.
+- Native bank statement lines, statement grouping, balances and ledger reconciliation.
+  Each statement must be wholly within coverage. Statement-generated payment collections
+  still need an additional adapter.
+- Exchange differences and cash-basis tax entries regenerated by native reconciliation.
+  They are matched against the original ledger and mapped to durable links, rather than
+  copied again. Different amounts, dates, ownership or unexpected generated entries roll back.
+- Explicit analytic account/plan mappings, with native analytic amounts checked after posting.
+- Matched fiscal-position rules and cash-rounding configurations, with native amounts checked.
+- Foreign-currency invoices and matching-rate partial manual payments.
+- Original invoice payment references, including deliberately blank references, in the audit.
 
-Only ordinary untracked goods with matched valuation evidence are covered. Lots/serials,
-packages, owners, manual receipt valuation adjustments, valuation journal-entry histories,
-pending supplier returns and nonstandard/multi-step pending stock routes remain BLOCKED.
-Native bill posting hooks still run. Any change to existing stock quantities/values,
-product costs, manual valuation records or an extra accounting entry rolls back the whole
-attempt. Source/target stock values are compared in company currency, including foreign POs.
-Receipt/return histories after cutover are blocked. Purchase/stock timestamps use UTC calendar
-days through 23:59:59 on the selected date; accounting uses native accounting dates.
+This is tested Community coverage, not certification for every tax/localization combination,
+all mixed exchange/cash-basis cases, EDI documents, payment providers or custom overrides.
 
-The user is unsure whether matching destination history exists. Missing history remains a
-concrete dependency; this candidate neither reconstructs past deliveries nor executes the
-stock mover. Test against a restored copy to establish which orders have verified matches.
+## Historical POs and tracked inventory
 
-## Transactions, failed attempts and uninstall survival
+Existing historical destination POs, lines, receipts and returns need explicit matches.
+Native received/billed/currently billable quantities, billing policies and remaining incoming
+commitments must agree. Copied or reused bills/credits link to those native PO lines.
 
-Current execution is one atomic full-history job, at most200 accounting documents and200
-POs. Larger histories, chunked continuation and incremental catch-up are NOT IMPLEMENTED.
-Interrupted native creates rollback together; failed reports are private native attachments.
-Retry/repeat confirmation and separate same-source jobs validate durable identity/evidence
-and reuse exact existing copies. Deleted/edited target evidence stops reuse. Company scope
-is sorted so ORM relation ordering cannot create a false stale-data warning.
+Existing lots/serials, ownership and packages can now be verified with explicit lot, package,
+contact and location matches. Product tracking policies, lot/serial numbers, quantities,
+package hierarchy/types and relevant expiry dates must agree. The mover changes no stock
+quantity, receipt value or product cost. Native bill valuation hooks run; economic changes
+cause rollback.
 
-Private ir.attachment audit files and ir.config_parameter links have no module XML IDs and
-remain when the document addons are uninstalled. Keep the native Accounting, Purchase
-and Inventory apps installed; survival testing removes only the mover addons. Copied accounting/payment/PO records are
-native records, with no cascade link to a migration job. Reinstall prevents second copies;
-it does not automatically recreate the old custom job screen. Administrators can retain
-and inspect the saved JSON receipt, including exact receipt/return IDs and evidence.
-After reinstall, recreate the accountant matches from that receipt before reviewing again. Normal employees cannot read those private audit files.
-Native corrections after go-live remain accountant work; changed evidence must be reviewed.
+Missing destination history is still a blocker. Replaying only old receipts could overstate
+inventory when the same goods were already sold, returned, counted or opened in the new
+company. Full reconstruction requires the complete movement/valuation history and explicit
+reconciliation of existing destination stock/openings. This version does not invent receipts.
+Manual receipt valuation, valuation journals, pending supplier returns and nonstandard
+multi-step pending routes still require additional reviewed history adapters.
 
-## Reproduce tests and rollback the disposable copy
+## Removal and recovery
 
-Pinned native runtime: Odoo19 Community commit9ec2b55d3fa343e6547a9db54d5f3f5c776c535d,
-Python3.12, PostgreSQL17.11. Existing pinned installation uses /workspace/odoo-19 and
-/workspace/.fifo-env/venv. Run bash tools/test_documents.sh from the extracted candidate.
-The script verifies its dedicated local data directory and no TCP listener, creates a NEW
-fifo_doc_repeat_* database, backs it up, installs/tests all four relevant addons, disables
-cron, uses a dedicated loopback test port and checks the native result count/failure status.
-It never takes a production URL/config. Test databases are retained for evidence.
+Every successful step stores private native audit evidence, settings, explicit matches and
+separate-transaction reasons, independently of custom module tables. Uninstall through
+Odoo before deleting the addon files. Keep Accounting, Purchase and Inventory installed.
+Download the latest receipt and keep a database/filestore backup.
 
-Standalone simulation scripts and commands are in the evidence package. Synthetic source
-A+B+C and standalone target include existing activity; source receipts/returns are fixtures
-only. No stock-migration workflow is called. No configured SMTP server or active provider,
-no real contact email/bank account, no scheduled jobs or external integration actions are
-used. Test signup/enrichment hooks are controlled by native test-mode/context; older initial
-logs show hook messages, which are not evidence of an actual external delivery.
+Reinstall automatically restores supported saved completed and partial moves with all their
+choices. Partial moves can resume from the next review. **Recover saved document moves**
+retries recovery from the menu. A damaged receipt is reported and isolated; healthy moves
+still recover. Changed/deleted native evidence is never silently accepted or copied again.
 
-Backups before fixtures and after completed simulation are retained in the local evidence
-workspace with the matching filestore. To rollback the synthetic exercise, restore into a
-NEW disposable DB using pg_restore plus its copied filestore. Never reset another database.
-Browser/mobile automation for the new candidate UI, enterprise/localization addons, real
-company data, actual stock execution and production performance are NOT TESTED.
+Automatic choice recovery applies to receipts written by 19.0.0.4.0. Older receipts retain
+native duplicate markers and their original audit, but do not contain every setting needed
+to reconstruct their screens automatically. Restore their explicit choices manually.
 
-## Fixes in 19.0.0.3.0
+## Checks before using your real database
 
-Before copying invoices, review checks for existing documents even when their number,
-accounting date or base-currency exchange rate differs. Candidates use the commercial
-invoice date, customer/vendor, currency, amount and mapped commercial line details.
-This is a duplicate warning, not proof that two transactions are identical. Arbitrarily
-changed earlier imports still require accountant review.
+The delivered evidence includes native regressions, a committed A+B+C simulation into an
+already-used destination, original invoice adoption, saved steps, and actual addon removal /
+reinstall with automatic completed/partial recovery. Desktop and phone Chromium tests run.
 
-If two candidates are genuinely separate transactions, use **Accountant: Separate
-transactions with similar details**, select that exact old/new pair, tick the separate
-transaction choice and record why. Each pair needs its own decision, saved in the audit.
-An actual earlier copy must stay unresolved: adopting existing unmarked accounting
-records or automatically correcting earlier imports is not implemented.
-
-Purchase products must use the same ordered/received-quantity billing policy. Review
-and final native checks verify quantities still to bill and invoice status. Pending
-receipts must belong to the correct product, company, unit and purchase line; quantities
-are converted through native units. Completed-job retries also check these conditions,
-including older links without the new supplementary evidence.
-
-Original invoice payment references, including intentionally blank references, are
-preserved through native creation/posting/write and included in private audit evidence.
-Changes invalidate review or reuse. An older copy already missing its original reference
-is stopped for accountant review; the mover does not silently recopy or repair it.
-
-After reinstall, create a new review and restore explicit matches and separate-transaction
-decisions from the original audit. Native records and the audit survive uninstalling these
-mover addons; the old custom job screens are not automatically reconstructed.
+Your restored database is still required to establish earlier-transfer overlap, missing stock
+history, custom/localized behavior and real-size lock/request timing. No production database
+or real payments/integrations were accessed. The original supplied stock addon remains
+unchanged in the installer and was not executed.

@@ -35,9 +35,12 @@ class DocumentJob(models.Model):
     old_operations_frozen = fields.Boolean(string='Old-company fulfilment will be stopped before new commitments are used')
     include_accounting = fields.Boolean(string='Original invoices, bills, credits and accounting history', default=True)
     mapping_ids = fields.One2many('company.document.mapping', 'job_id', string='Explicit matches', copy=False)
+    batch_size = fields.Integer(string='Records per step', default=100, required=True)
+    record_limit = fields.Integer(string='Maximum records to review', default=10000, required=True)
+    allow_incremental = fields.Boolean(string='Include additional history after an earlier move')
     overlap_ids = fields.One2many('company.document.overlap', 'job_id', string='Separate transactions', copy=False)
     state = fields.Selection([('draft', 'Choose'), ('blocked', 'Choices needed'), ('ready', 'Review'),
-                              ('failed', 'Failed safely'), ('done', 'Result')], default='draft', readonly=True, copy=False)
+                              ('failed', 'Failed safely'), ('partial', 'Next step'), ('done', 'Result')], default='draft', readonly=True, copy=False)
     report = fields.Text(readonly=True, copy=False)
     preview_hash = fields.Char(readonly=True, copy=False)
     audit_attachment_id = fields.Many2one('ir.attachment', readonly=True, copy=False, ondelete='set null')
@@ -88,10 +91,19 @@ class DocumentJob(models.Model):
             data = json.loads(raw)
             target = self.env[record._name].browse(data['target']).exists()
             target.check_access('read')
-            if len(target) != 1 or data['source_hash'] != self._fingerprint(record) or data['target_hash'] != self._fingerprint(target):
+            if (len(target) != 1 or target.company_id != self.target_company_id or
+                    record.company_id not in self.source_company_ids or data.get('source') != record.id or data.get('model') != record._name):
+                raise UserError('Saved document ownership or company differs. Review the original receipt before reuse.')
+            if data['source_hash'] != self._fingerprint(record) or data['target_hash'] != self._fingerprint(target):
                 raise UserError('Saved migration evidence changed or a native document was deleted: %s.' % record.display_name)
-            if 'source_details' in data and (data['source_details'] != self._record_details(record) or data['target_details'] != self._record_details(target)):
-                raise UserError('Saved document reference or purchase billing settings changed; review the migration evidence.')
+            if 'source_details' in data:
+                original, destination = self._record_details(record), self._record_details(target)
+                if data.get('evidence_version', 3) < 4:
+                    # Preserve compatibility with the smaller pre-4.0 evidence schema.
+                    original = {key: original.get(key) for key in data['source_details']}
+                    destination = {key: destination.get(key) for key in data['target_details']}
+                if data['source_details'] != original or data['target_details'] != destination:
+                    raise UserError('Saved document reference, reconciliation or purchase billing settings changed; review the migration evidence.')
             if record._name == 'account.move' and record.is_invoice(include_receipts=True) and record.payment_reference != target.payment_reference:
                 raise UserError('An earlier transfer has a different invoice payment reference. Review the existing copy; no second copy will be made.')
             return data
@@ -129,8 +141,10 @@ class DocumentJob(models.Model):
             raise UserError('Journal type, currency or active setting differs: %s.' % record.display_name)
         if record._name == 'account.tax':
             names = ['amount', 'amount_type', 'type_tax_use', 'price_include_override', 'include_base_amount', 'is_base_affected', 'tax_exigibility']
-            if any(record[n] != target[n] for n in names) or record.tax_exigibility == 'on_payment':
+            if any(record[n] != target[n] for n in names):
                 raise UserError('Tax configuration differs or needs unsupported cash-basis history: %s.' % record.display_name)
+            if record.tax_exigibility == 'on_payment' and self._target(record.cash_basis_transition_account_id) != target.cash_basis_transition_account_id:
+                raise UserError('Cash-basis transition account differs.')
             if record.amount_type == 'group':
                 if sorted(self._target(t).id for t in record.children_tax_ids) != sorted(target.children_tax_ids.ids):
                     raise UserError('Grouped tax children differ.')
@@ -162,16 +176,21 @@ class DocumentJob(models.Model):
                 'invoice_ids', 'payment_reference', 'memo'])[0])
         return digest(record.read()[0])
 
+    @api.constrains('batch_size', 'record_limit')
+    def _check_limits(self):
+        if any(not 1 <= j.batch_size <= 1000 or not j.batch_size <= j.record_limit <= 50000 for j in self):
+            raise ValidationError('Choose 1–1,000 records per step and a review limit from that size to 50,000.')
+
     def _moves(self):
         if not self.include_accounting:
             return self.env['account.move']
         moves = self.env['account.move'].search([('company_id', 'in', self.source_company_ids.ids),
-            ('date', '<=', self.cutover_date), ('state', 'in', ['draft', 'posted'])], order='date,id', limit=201)
-        if len(moves) > 200:
-            raise UserError('This candidate supports 200 accounting documents per atomic full-history job. Larger/batched histories are not implemented.')
+            ('date', '<=', self.cutover_date), ('state', 'in', ['draft', 'posted'])], order='date,id', limit=self.record_limit + 1)
+        if len(moves) > self.record_limit:
+            raise UserError('Accounting history exceeds the review limit (%s). Increase Maximum records to review after a restored-copy timing check.' % self.record_limit)
         return moves.filtered(lambda m: m.state == 'posted' or m.is_invoice(include_receipts=True))
 
-    def _move_checks(self, move, all_moves):
+    def _move_checks(self, move, all_moves, represented=None):
         self._target(move.journal_id)
         self._target(move.partner_id)
         if move.invoice_payment_term_id:
@@ -182,27 +201,21 @@ class DocumentJob(models.Model):
             self._target(line.product_id)
             for tax in line.tax_ids | line.tax_line_id:
                 self._target(tax)
-            if line.analytic_distribution:
-                raise UserError('Analytic allocations need explicit additional mapping: %s.' % move.display_name)
             if 'purchase_line_id' in line._fields and line.purchase_line_id:
                 self._check_purchase_line(line, all_moves)
-        if move.statement_line_id or getattr(move, 'stock_move_ids', False):
+        if getattr(move, 'stock_move_ids', False):
             raise UserError('Bank-statement/stock-valuation history needs additional native history mappings: %s.' % move.display_name)
         if getattr(move, 'edi_document_ids', False):
             raise UserError('Electronic invoicing history requires localization review: %s.' % move.display_name)
-        if move.fiscal_position_id or move.invoice_cash_rounding_id:
-            raise UserError('Fiscal positions/cash rounding need explicit localization mapping: %s.' % move.display_name)
-        if move.move_type == 'entry' and (move.line_ids.tax_ids or move.line_ids.tax_line_id or move.line_ids.tax_tag_ids):
+        if move.move_type == 'entry' and not move.tax_cash_basis_rec_id and (move.line_ids.tax_ids or move.line_ids.tax_line_id or move.line_ids.tax_tag_ids):
             raise UserError('Tax-reporting manual journal entries require repartition/tag mapping: %s.' % move.display_name)
         partials = move.line_ids.matched_debit_ids | move.line_ids.matched_credit_ids
         if (partials.debit_move_id.move_id | partials.credit_move_id.move_id) - all_moves:
             raise UserError('Reconciliation reaches outside cutover coverage; historical residual reconstruction is not implemented: %s.' % move.display_name)
-        if any(p.exchange_move_id for p in partials):
-            raise UserError('Exchange-difference reconciliation history is not implemented: %s.' % move.display_name)
         if move.reversed_entry_id and move.reversed_entry_id not in all_moves:
             raise UserError('Credit-note original is outside selected history.')
         journal = self._target(move.journal_id)
-        if move.state == 'posted' and self.target_company_id._get_violated_lock_dates(move.date, bool(move.line_ids.tax_ids | move.line_ids.tax_line_id), journal):
+        if not self.mapping_ids.filtered(lambda r: r.model_name == 'account.move' and r.source_id == move.id) and not self._stored_link(move) and move.state == 'posted' and self.target_company_id._get_violated_lock_dates(move.date, bool(move.line_ids.tax_ids | move.line_ids.tax_line_id), journal):
             raise UserError('Destination locked date affects %s; unlock only after accountant approval.' % move.display_name)
         payment = move.origin_payment_id
         if payment:
@@ -218,8 +231,9 @@ class DocumentJob(models.Model):
         existing = self.env['account.move'].browse(stored['target']) if stored else self.env['account.move']
         rows = self.mapping_ids.filtered(lambda r: r.model_name == 'account.move' and r.source_id == move.id)
         if rows and not existing:
-            raise UserError('Reusing manually selected existing documents is not yet implemented; explicit duplicate reconciliation is required.')
-        represented = self.env['account.move'].browse([data['target'] for item in all_moves if (data := self._stored_link(item))])
+            existing, _ = self._adoption(move)
+        if represented is None:
+            represented = existing
         # Numbering often changes during imports. Compare business content as well.
         identifiers = [v for v in (move.name if move.name != '/' else None, move.ref) if v]
         date_domain = [('invoice_date', '=', move.invoice_date)] if move.is_invoice(include_receipts=True) else [('date', '=', move.date)]
@@ -258,6 +272,8 @@ class DocumentJob(models.Model):
         raise UserError('Bill/PO line links need the received/billed purchase-history mapping dependency: %s.' % line.move_id.display_name)
 
     def _mapping_config(self, record):
+        if record._name == 'account.move':
+            return [self._fingerprint(record), self._record_details(record)]
         return record.read(['write_date'])[0]
 
     def _extra_plan(self, issues):
@@ -284,6 +300,8 @@ class DocumentJob(models.Model):
             issues.append('Accountant must review existing destination documents, payments and earlier transfers.')
         Parameter = self.env['ir.config_parameter'].sudo()
         claims={}
+        if not self.include_accounting and not getattr(self, 'include_purchase', False):
+            issues.append('Select accounting documents or purchase orders to move.')
         if self.include_accounting:
             for company in source:
                 old = Parameter.get_param('company_financial_cutover.completed.source.%s' % company.id)
@@ -293,24 +311,42 @@ class DocumentJob(models.Model):
                 if claim:
                     data = json.loads(claim)
                     claims[company.id]=data
-                    if data['target'] != target.id or data['cutover'] != str(self.cutover_date):
-                        issues.append('This source history was migrated with another destination/date; incremental catch-up is not implemented.')
+                    if data['target'] != target.id or data['cutover'] > str(self.cutover_date):
+                        issues.append('This source belongs to another destination or a later completed date.')
+                    elif data['cutover'] != str(self.cutover_date) and not self.allow_incremental:
+                        issues.append('Select Include additional history to extend the earlier cutover date.')
         try:
             moves = self._moves()
         except UserError as exc:
             issues.append(str(exc)); moves = self.env['account.move']
         for company_id,claim in claims.items():
-            if sorted(claim.get('documents',[])) != sorted(moves.filtered(lambda m:m.company_id.id==company_id).ids):
-                issues.append('Source document coverage changed after completion. Incremental migration or deleted-document recovery needs accountant review.')
+            previous = set(claim.get('documents', []))
+            current = set(moves.filtered(lambda m:m.company_id.id==company_id).ids)
+            if previous - current:
+                issues.append('Previously moved source documents are missing from coverage. Restore or review them before continuing.')
+            elif previous != current and claim.get('complete', True) and not self.allow_incremental:
+                issues.append('Source document coverage changed after completion. Select Include additional history after accountant review.')
         payments = self.env['account.payment'].search([('company_id', 'in', source.ids), ('date', '<=', self.cutover_date),
             ('state', 'not in', ['canceled', 'rejected'])]) if self.include_accounting else self.env['account.payment']
         if payments.filtered(lambda p: not p.move_id or p.move_id not in moves):
             issues.append('Payments without a covered native journal entry are not implemented.')
-        for move in moves:
+        represented = self.env['account.move']
+        for item in moves:
             try:
-                self._move_checks(move, moves)
+                if data := self._stored_link(item):
+                    represented |= self.env['account.move'].browse(data['target'])
             except UserError as exc:
                 issues.append(str(exc))
+        represented |= self.env['account.move'].browse(self.mapping_ids.filtered(lambda r: r.model_name == 'account.move' and r.source_id in moves.ids).mapped('target_id'))
+        for move in moves:
+            try:
+                self._move_checks(move, moves, represented)
+            except UserError as exc:
+                issues.append(str(exc))
+        try:
+            self._check_existing_reconciliations(moves)
+        except UserError as exc:
+            issues.append(str(exc))
         extra = self._extra_plan(issues)
         # Digest all input mappings, native configuration and pre-existing destination ledger.
         configs = {}
@@ -323,11 +359,11 @@ class DocumentJob(models.Model):
                         'account.account': ['name','code','active','account_type','reconcile','company_ids','currency_id'],
                         'account.journal': ['name','code','type','company_id','currency_id','active','default_account_id'],
                         'account.tax': ['name','company_id','amount','amount_type','type_tax_use','price_include_override',
-                            'include_base_amount','is_base_affected','tax_exigibility','children_tax_ids','invoice_repartition_line_ids','refund_repartition_line_ids'],
+                            'include_base_amount','is_base_affected','tax_exigibility','cash_basis_transition_account_id','children_tax_ids','invoice_repartition_line_ids','refund_repartition_line_ids'],
                         'res.partner': ['name','vat','ref','company_id','active'],
                         'product.product': ['name','company_id','active','type','uom_id','purchase_ok','taxes_id','supplier_taxes_id'],
                         'account.payment.term': ['name','company_id','line_ids'],
-                        'account.move': ['date','state','company_id','amount_total','amount_residual'],
+                        'account.move': None,
                     }.get(row.model_name)
                     configs['%s:%s' % (row.model_name, r.id)] = r.read(names + (['purchase_method'] if row.model_name == 'product.product' and 'purchase_method' in r._fields else []))[0] if names else self._mapping_config(r)
                     if row.model_name == 'account.tax':
@@ -338,9 +374,12 @@ class DocumentJob(models.Model):
         data = {'source': sorted(source.ids), 'target': target.id, 'cutover': str(self.cutover_date),
             'moves': [(m.id, self._fingerprint(m), self._record_details(m)) for m in moves],
             'payments': [(p.id, self._fingerprint(p)) for p in payments],
+            'limits': [self.batch_size, self.record_limit, self.allow_incremental],
             'mappings': self.mapping_ids.read(['model_name', 'source_id', 'target_id']), 'config': configs,
             'companies': (source | target).sorted('id').read(['currency_id', 'vat', 'account_fiscal_country_id', 'fiscalyear_last_day',
-                'fiscalyear_last_month', 'hard_lock_date', 'fiscalyear_lock_date', 'tax_lock_date', 'sale_lock_date', 'purchase_lock_date']),
+                'fiscalyear_last_month', 'hard_lock_date', 'fiscalyear_lock_date', 'tax_lock_date', 'sale_lock_date', 'purchase_lock_date',
+                'tax_exigibility', 'tax_cash_basis_journal_id', 'account_cash_basis_base_account_id',
+                'currency_exchange_journal_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id']),
             'rates': self.env['res.currency.rate'].search([]).read(['name', 'company_id', 'currency_id', 'rate']),
             'overlaps': self.overlap_ids.read(['source_move_id', 'target_move_id', 'separate', 'reason']),
             'destination': [(m.id, self._fingerprint(m), self._record_details(m)) for m in destination], 'extra': extra}
@@ -355,14 +394,23 @@ class DocumentJob(models.Model):
         for m in moves.filtered(lambda m: m.state == 'posted'):
             for line in m.line_ids:
                 totals[line.account_id.display_name] += line.balance
+        valid_links = {}
+        for move in moves:
+            try:
+                valid_links[move.id] = self._stored_link(move)
+            except UserError as exc:
+                issues.append(str(exc))
+        issues = sorted(set(issues))
         overview = {'method': 'Full history replay; NO additional opening entry', 'through': str(self.cutover_date),
             'documents': dict(Counter((m.move_type, m.state).__str__() for m in moves)),
-            'posted_account_balances': dict(totals), 'new': sum(not bool(self._stored_link(m)) for m in moves),
-            'already_moved': sum(bool(self._stored_link(m)) for m in moves), 'purchase': extra}
+            'posted_account_balances': dict(totals), 'new': sum(not valid_links.get(m.id) and not bool(self.mapping_ids.filtered(lambda r:r.model_name=='account.move' and r.source_id==m.id)) for m in moves),
+            'already_moved': sum(bool(valid_links.get(m.id)) for m in moves), 'purchase': extra}
         labels={'out_invoice':'Customer invoices','in_invoice':'Vendor bills','out_refund':'Customer credit notes',
             'in_refund':'Vendor credit notes','entry':'Other accounting entries','out_receipt':'Customer receipts','in_receipt':'Vendor receipts'}
+        adopted = len(self.mapping_ids.filtered(lambda r:r.model_name=='account.move' and r.source_id in moves.ids and not valid_links.get(r.source_id)))
         details=['Original accounting history through %s — no additional opening entry.' % self.cutover_date,
-            'New documents: %s. Already moved: %s.' % (overview['new'],overview['already_moved'])]
+            'New documents: %s. Already moved: %s. Reuse existing documents: %s.' % (overview['new'],overview['already_moved'],adopted),
+            'Each confirmation targets %s records; connected payments and credits stay together and may exceed that size. Review again to continue the next step.' % self.batch_size]
         for (kind,state),count in sorted(Counter((m.move_type,m.state) for m in moves).items()):
             details.append('%s (%s): %s' % (labels.get(kind,kind),state,count))
         if totals:
@@ -484,9 +532,10 @@ class DocumentJob(models.Model):
         return target, self._line_map(source, target), native_payment
 
     def _save_link(self, source, target, line_map=None):
-        data = {'source': source.id, 'model': source._name, 'target': target.id, 'job': self.id,
+        data = {'evidence_version': 4, 'source': source.id, 'model': source._name, 'target': target.id, 'job': self.id,
             'source_company': source.company_id.id, 'target_company': self.target_company_id.id,
-            'source_number': source.name, 'source_label': source.display_name, 'original_ref': source.ref if source._name=='account.move' else source.partner_ref if source._name=='purchase.order' else source.payment_reference, 'source_hash': self._fingerprint(source),
+            'adopted_existing': bool(self.mapping_ids.filtered(lambda r:r.model_name==source._name and r.source_id==source.id and r.target_id==target.id)),
+            'source_number': source.name, 'source_label': source.display_name, 'original_ref': source.ref if source._name=='account.move' else source.partner_ref if source._name=='purchase.order' else getattr(source, 'payment_reference', getattr(source, 'reference', False)), 'source_hash': self._fingerprint(source),
             'target_hash': self._fingerprint(target), 'source_details': self._record_details(source), 'target_details': self._record_details(target), 'line_map': line_map or {}, 'cutover': str(self.cutover_date)}
         self.env['ir.config_parameter'].sudo().set_param(self._key(source), packed(data))
         return data
@@ -514,6 +563,10 @@ class DocumentJob(models.Model):
                     raise UserError('\n'.join(issues))
                 if self.state != 'ready' or self.preview_hash != signature:
                     raise UserError('Source, destination or setup changed. Review the move again before confirming.')
+                all_moves = moves
+                moves = self._execution_moves(all_moves)
+                self = self._prepare_copies(moves)
+                generated_moves = self._generated_moves(moves)
                 targets, line_map, payments = {}, {}, {}
                 for source in moves:
                     stored = self._stored_link(source)
@@ -521,36 +574,33 @@ class DocumentJob(models.Model):
                         targets[source.id] = self.env['account.move'].browse(stored['target'])
                         line_map.update(stored['line_map'])
                     else:
-                        target, lines, payment = self._copy_move(source)
+                        if source in generated_moves and not self._is_reused(source):
+                            continue
+                        target, lines = self._adoption(source)
+                        payment = False
+                        if not target:
+                            target, lines, payment = self._copy_move(source)
                         targets[source.id] = target
                         line_map.update(lines)
                         if payment:
                             payments[source.origin_payment_id.id] = payment
-                for source in moves:
+                self._after_copies(targets)
+                for source in moves.filtered(lambda m:m.id in targets):
                     target = targets[source.id]
                     if source.reversed_entry_id:
-                        target.write({'reversed_entry_id': targets[source.reversed_entry_id.id].id})
-                    if source.origin_payment_id and source.origin_payment_id.id in payments:
-                        payments[source.origin_payment_id.id].write({'invoice_ids': [Command.set(
-                            [targets[i.id].id for i in source.origin_payment_id.invoice_ids])]})
-                partials = (moves.line_ids.matched_debit_ids | moves.line_ids.matched_credit_ids).sorted('id')
-                for partial in partials:
-                    debit = self.env['account.move.line'].browse(line_map[str(partial.debit_move_id.id)])
-                    credit = self.env['account.move.line'].browse(line_map[str(partial.credit_move_id.id)])
-                    existing = debit.matched_credit_ids.filtered(lambda p: p.credit_move_id == credit)
-                    if existing:
-                        if not self.target_company_id.currency_id.is_zero(sum(existing.mapped('amount')) - partial.amount):
-                            raise UserError('Existing reconciliation differs from source evidence.')
-                        continue
-                    if not self.target_company_id.currency_id.is_zero(min(debit.amount_residual, -credit.amount_residual) - partial.amount):
-                        raise UserError('This partial reconciliation cannot be reproduced by native reconcile() exactly.')
-                    before = debit.matched_credit_ids
-                    (debit | credit).reconcile()
-                    created = debit.matched_credit_ids - before
-                    if len(created) != 1 or not self.target_company_id.currency_id.is_zero(created.amount - partial.amount) or \
-                       not debit.currency_id.is_zero(created.debit_amount_currency - partial.debit_amount_currency) or \
-                       not credit.currency_id.is_zero(created.credit_amount_currency - partial.credit_amount_currency):
-                        raise UserError('Native reconciliation produced different accounting/foreign amounts; rolled back.')
+                        original = targets[source.reversed_entry_id.id]
+                        if target.reversed_entry_id != original:
+                            if self._is_reused(source):
+                                raise UserError('Existing credit note must already refer to the selected original invoice.')
+                            target.write({'reversed_entry_id': original.id})
+                    if source.origin_payment_id:
+                        expected = self.env['account.move'].browse([targets[i.id].id for i in source.origin_payment_id.invoice_ids])
+                        native = target.origin_payment_id
+                        if native.invoice_ids - expected:
+                            raise UserError('Existing payment links include an unrelated invoice; review that history before reuse.')
+                        if native.invoice_ids != expected:
+                            native.write({'invoice_ids': [Command.set(expected.ids)]})
+                self._reconcile_moves(moves, targets, line_map)
                 for source in moves:
                     for line in source.line_ids:
                         target_line = self.env['account.move.line'].browse(line_map[str(line.id)])
@@ -570,20 +620,32 @@ class DocumentJob(models.Model):
                         if target_pay.state != source.origin_payment_id.state:
                             raise UserError('Native payment state differs; rolled back.')
                         audit['links'].append(self._save_link(source.origin_payment_id, target_pay))
-                self._extra_execute(extra, audit)
-                if self.include_accounting and moves:
+                remaining = all_moves.filtered(lambda m: not self._stored_link(m))
+                if not remaining:
+                    self._extra_execute(extra, audit)
+                pending_purchase = self._remaining_extra(extra)
+                complete = not remaining and not pending_purchase
+                if self.include_accounting and all_moves:
                     for company in self.source_company_ids:
                         self.env['ir.config_parameter'].sudo().set_param(SOURCE + str(company.id), packed({
                             'target': self.target_company_id.id, 'cutover': str(self.cutover_date), 'job': self.id,
-                            'documents': moves.filtered(lambda m:m.company_id==company).ids}))
+                            'documents': all_moves.filtered(lambda m:m.company_id==company and self._stored_link(m)).ids,
+                            'complete': not remaining, 'reviewed_documents': all_moves.filtered(lambda m:m.company_id==company).ids}))
                         self.env['ir.config_parameter'].sudo().set_param('company_financial_cutover.completed.source.%s' % company.id,
                             packed({'document_job': self.id, 'date': str(self.cutover_date)}))
+                audit['settings'] = self._recovery_settings()
+                audit['mappings'] = self.mapping_ids.read(['model_name', 'source_id', 'target_id'])
+                audit['complete'] = complete
+                audit['links'] = self._recovery_links(all_moves, extra)
                 attachment = self.env['ir.attachment'].sudo().create({'name': 'Accounting-document-move-%s.json' % self.id,
                     'type': 'binary', 'raw': packed(audit).encode(), 'mimetype': 'application/json',
                     'res_model': False, 'res_id': False, 'company_id': self.target_company_id.id, 'public': False})
-                self._system_write({'state': 'done', 'audit_attachment_id': attachment.id,
-                    'report': 'Completed. Original source records stayed unchanged.\nCopied or verified %s accounting documents and %s purchase orders.\nNo additional opening entry or validated delivery was created.\nThe saved receipt contains the original references and record matches.' % (len(moves),len(extra.get('orders',[])))})
+                self.env['ir.config_parameter'].sudo().set_param('company_document_cutover.receipt.%s' % self.recovery_key, packed({'hash': digest(audit), 'target': self.target_company_id.id, 'attachment': attachment.id}))
+                self._system_write({'state': 'done' if complete else 'partial', 'preview_hash': False, 'audit_attachment_id': attachment.id,
+                    'report': ('Completed.' if complete else 'Step saved. %s accounting documents and %s purchase orders remain. Click Review my documents to continue.' % (len(remaining), pending_purchase)) + ' Original source records stayed unchanged.\nCopied or verified %s accounting documents and %s purchase orders.\nNo additional opening entry or validated delivery was created.\nThe saved receipt contains the original references and record matches.' % (len(audit['links']) - sum(l['model'] != 'account.move' for l in audit['links']),len(extra.get('orders',[])) - pending_purchase)})
         except (UserError, ValidationError) as exc:
+            # get_param() caches can contain markers read inside the rolled-back step.
+            self.env.registry.clear_cache('stable')
             self.env.invalidate_all()
             report='No records from this attempt were retained. Review these findings together:\n' + str(exc)
             failure=self.env['ir.attachment'].sudo().create({'name':'Document-move-%s-failed.json' % self.id,

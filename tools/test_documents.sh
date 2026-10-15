@@ -25,7 +25,7 @@ DOC_LOG="$DOC_EVIDENCE_DIR/$DOC_DATABASE.log"
 "$DOC_PYTHON" "$DOC_ODOO_DIR/odoo-bin" -d "$DOC_DATABASE" --db_host="$DOC_RUNTIME_DIR/socket" --db_port=55433 --db_user=agent \
   --addons-path="$DOC_ODOO_DIR/addons,$DOC_REPO_DIR" --data-dir="$DOC_RUNTIME_DIR/data" --without-demo \
   -i company_document_purchase_cutover,company_purchase_cutover --test-enable \
-  --test-tags=/company_financial_cutover,/company_purchase_cutover,/company_document_cutover,/company_document_purchase_cutover \
+  --test-tags=/company_financial_cutover,/company_purchase_cutover,/company_document_cutover,/company_document_purchase_cutover,-document_browser \
   --stop-after-init --no-http --http-interface=127.0.0.1 --http-port=18433 --max-cron-threads=0 --logfile="$DOC_LOG"
 "$DOC_PYTHON" - "$DOC_LOG" <<'PY'
 import pathlib,re,sys

@@ -1,10 +1,8 @@
-# Company Purchase Document Migration — optional candidate bridge
+# Optional Company Purchase Document Migration — 19.0.0.4.0 test candidate
 
-Copies untouched RFQs/POs and reuses explicitly matched historical destination POs,
-receipts and returns. Copied vendor bills/credits link natively to matched PO lines.
-No historical stock move is created or validated. Missing or different destination
-history is reported together; unmarked existing bills are not silently adopted.
+Copies untouched RFQs/POs in resumable steps and reuses matched historical POs and their
+existing native receipt/return history. Bills/credits link natively; verified existing bills
+can be adopted. Matched lots/serials, owners, packages and locations are checked without
+moving inventory. Missing receipts, valuation history and complex routes need separate work.
 
-Native valuation hooks run, with full rollback if existing stock economics change.
-Untracked goods only; see ../MIGRATION-GUIDE.md for supported history and remaining limits.
-Purchase/Inventory is optional for the accounting-only addon. Version19.0.0.3.0 is test-only.
+Native valuation hooks run and economic changes roll back. Read ../MIGRATION-GUIDE.md.
