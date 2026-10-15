@@ -1,11 +1,16 @@
-TEST-ONLY DOCUMENT CANDIDATE 19.0.0.4.0
+TEST-ONLY DOCUMENT CANDIDATE 19.0.0.5.0
 Use a restored/disposable database. Read MIGRATION-GUIDE.md and VALIDATION-REPORT.md first.
 Accounting documents: company_document_cutover. Optional purchase documents/history: company_document_purchase_cutover.
-Received/billed POs require verified existing destination PO/receipt/return matches.
+For received/billed POs, keep current stock with historical references, or explicitly match existing native PO/receipt/return history.
 Use explicit Existing accounting document matches to reuse earlier copies.
 Each confirmation saves one step; Review again to continue until Completed.
 New saved moves and choices recover automatically after reinstall; damaged receipts are isolated.
-Bills link natively; missing stock history stays blocked. The supplied stock addon is unchanged and untested.
+Bills link natively to verified existing POs, or retain audit-only PO references when native receipts are missing. The supplied stock addon is unchanged and untested.
+
+FULL DOCUMENT OPTION
+Install company_document_cutover with company_financial_cutover. Add company_document_purchase_cutover only for purchase documents (requires native purchase_stock). Use Original document moves. Do not combine full historical replay and a financial opening representing the same amounts.
+
+The following sections describe the separate LEGACY opening-balance/purchase-history workflow.
 
 FiFO-move for Odoo 19
 
@@ -61,3 +66,6 @@ The full bundle includes README.md, all addon READMEs, tools/ and tests/.
 See README.md for the isolated Odoo/PostgreSQL setup and native tests.
 Use a restored copy to measure full cutover locks/scans and validate your installed
 modules; synthetic test timings do not establish production-size performance.
+
+HISTORICAL PURCHASE OPTION
+Keep current stock; retain missing history for reference is the default for received/billed POs without explicit native matches. It creates private historical records, not live POs or deliveries. Review remaining supplier deliveries and received-but-unbilled items separately. Existing matched native valuation/route histories are verified without stock writes. Provider/EDI/internal-transfer history remains blocked. Read MIGRATION-GUIDE.md.

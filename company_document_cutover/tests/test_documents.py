@@ -588,3 +588,17 @@ class TestDocumentMigration(FinancialCutoverCase):
         self.env['ir.config_parameter'].sudo().set_param('company_document_cutover.link.account.move.invalid','damaged')
         job.action_review();self.assertEqual(job.state,'blocked');self.assertIn('ownership evidence is damaged',job.report)
         self.assertEqual(self.env['account.move'].search_count([('company_id','=',self.target.id)]),1)
+
+    def test_completed_and_recovered_receipts_ignore_browser_binary_size_context(self):
+        self._document('out_invoice', 100); job = self._job(); self._run_job(job)
+        self.env.invalidate_all()
+        job.with_context(bin_size=True).action_execute()
+        key = job.recovery_key
+        self.env.cr.execute('DELETE FROM company_document_mapping WHERE job_id=%s', [job.id])
+        self.env.cr.execute('DELETE FROM company_document_cutover WHERE id=%s', [job.id])
+        self.env.invalidate_all()
+        self.env['company.document.cutover'].with_context(bin_size=True).action_restore_saved_moves()
+        restored = self.env['company.document.cutover'].search([('recovery_key','=',key)])
+        self.assertEqual(len(restored), 1); self.assertEqual(restored.state, 'done')
+        restored.with_context(bin_size=True).action_execute()
+        self.assertEqual(self.env['account.move'].search_count([('company_id','=',self.target.id)]),1)

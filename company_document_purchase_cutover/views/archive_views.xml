@@ -1,0 +1,12 @@
+<odoo>
+ <record id="purchase_archive_form" model="ir.ui.view"><field name="name">company.document.purchase.archive.form</field><field name="model">company.document.purchase.archive</field><field name="arch" type="xml">
+  <form string="Historical purchase reference" create="0" edit="0" delete="0"><sheet>
+   <div class="alert alert-info" role="status">History only. Current stock stays unchanged. This reference is not a live purchase order and does not arrange any delivery.</div>
+   <group><field name="name"/><field name="source_company_id"/><field name="company_id"/><field name="source_order_id" options="{'no_create': True}"/><field name="saved_filename" invisible="True"/><field name="saved_documents" filename="saved_filename"/></group>
+   <field name="report" nolabel="1"/><group string="Accounting references" col="1"><field name="accounting_matches" nolabel="1"/></group>
+  </sheet></form>
+ </field></record>
+ <record id="purchase_archive_list" model="ir.ui.view"><field name="name">company.document.purchase.archive.list</field><field name="model">company.document.purchase.archive</field><field name="arch" type="xml"><list create="0" edit="0" delete="0"><field name="name"/><field name="source_company_id"/><field name="company_id"/></list></field></record>
+ <record id="purchase_archive_action" model="ir.actions.act_window"><field name="name">Historical purchase references</field><field name="res_model">company.document.purchase.archive</field><field name="view_mode">list,form</field></record>
+ <menuitem id="purchase_archive_menu" name="Historical purchase references" parent="purchase.menu_purchase_root" action="purchase_archive_action" groups="purchase.group_purchase_manager" sequence="90"/>
+</odoo>

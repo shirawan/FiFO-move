@@ -1,0 +1,4 @@
+<odoo>
+ <record id="purchase_archive_company_rule" model="ir.rule"><field name="name">Historical purchases in enabled companies</field><field name="model_id" ref="model_company_document_purchase_archive"/><field name="domain_force">[('company_id', 'in', company_ids), ('source_company_ids', 'not any', [('id', 'not in', company_ids)])]</field></record>
+ <record id="document_package_type_company_rule" model="ir.rule"><field name="name">Document review package types in enabled companies</field><field name="model_id" ref="stock.model_stock_package_type"/><field name="groups" eval="[(4, ref('account.group_account_manager'))]"/><field name="domain_force">[('company_id', 'in', company_ids + [False])]</field></record>
+</odoo>

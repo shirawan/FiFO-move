@@ -1,15 +1,18 @@
-# Company document migration — test candidate 19.0.0.4.0
+# Company document migration — test candidate 19.0.0.5.0
 
-[Latest bundle and checksums](bundles/document-migration-19.0.0.4.0/).
+[Latest bundle and checksums](bundles/document-migration-19.0.0.5.0/).
 
-Adds verified reuse of existing invoices/payments, resumable accounting/PO steps, automatic
-saved-choice recovery, bank statements, native exchange/cash-basis entry matching, analytic /
-fiscal-position / cash-rounding support, and existing tracked receipt matching.
+Adds a stock-preserving option for missing historical receipts and returns: retain original
+purchase quantities, route/valuation references and bill matches as private audit history.
+It creates no fake received quantity or live delivery for those historical orders. Existing
+explicitly matched native histories remain available, including verified manual adjustments,
+valuation entries, pending returns and multi-step routes.
 
 Read [MIGRATION-GUIDE.md](MIGRATION-GUIDE.md) and [VALIDATION-REPORT.md](VALIDATION-REPORT.md).
-Use a restored database first. Missing stock-history reconstruction and provider/EDI/custom
-localization cases still need separate work. The bundle's stock source remains original;
-repository stock source retains its newer main-branch fixes.
+Use a restored database first. Missing native stock reconstruction, provider/EDI/internal
+payment adapters and custom localizations still need separate work. Stock-linked ledger
+entries require verified existing adoption to prevent adding inventory twice. The bundle's
+stock source remains original; repository stock source retains its newer main-branch fixes.
 
 # FiFO-move
 

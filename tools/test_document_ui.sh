@@ -23,8 +23,8 @@ DOC_UI_LOG="$DOC_UI_EVIDENCE/browser-$DOC_UI_DATABASE-$(date -u +%Y%m%d%H%M%S).l
 import pathlib,re,sys
 text=pathlib.Path(sys.argv[1]).read_text()
 summary=re.findall(r'(\d+) failed, (\d+) error\(s\) of (\d+) tests',text)
-assert summary and tuple(map(int,summary[-1]))==(0,0,2),summary
+assert summary and tuple(map(int,summary[-1]))==(0,0,4),summary
 assert 'skipped TestDocumentBrowser' not in text,'Browser tests skipped'
-assert text.count('.browser: test successful')==2,'Both real browser flows must finish'
-print('2 Chromium browser tests passed:',sys.argv[1])
+assert text.count('.browser: test successful')==6,'All accounting and purchase-history browser flows must finish'
+print('4 Chromium browser tests passed (6 page flows):',sys.argv[1])
 PY

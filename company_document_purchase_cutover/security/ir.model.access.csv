@@ -1,0 +1,5 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_purchase_archive,Historical purchase references,model_company_document_purchase_archive,purchase.group_purchase_manager,1,0,0,0
+access_document_manual_value_read,Read valuation history for document review,stock_account.model_product_value,account.group_account_manager,1,0,0,0
+access_document_stock_lot_read,Read lot history for document review,stock.model_stock_lot,account.group_account_manager,1,0,0,0
+access_document_package_type_read,Read package history for document review,stock.model_stock_package_type,account.group_account_manager,1,0,0,0

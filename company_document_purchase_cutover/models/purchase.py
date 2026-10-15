@@ -1,7 +1,7 @@
 from odoo import fields, models, Command
 from odoo.tools.float_utils import float_compare
 from odoo.exceptions import UserError, AccessError
-from odoo.addons.company_document_cutover.models.migration import digest
+from odoo.addons.company_document_cutover.models.migration import digest, remove_optional_document_matches
 
 
 class PurchaseDocumentJob(models.Model):
@@ -15,7 +15,7 @@ class PurchaseDocumentJob(models.Model):
 
     def _target(self, record):
         target = super()._target(record)
-        if record and record._name == 'product.product' and self.include_purchase and record.purchase_method != target.purchase_method:
+        if record and record._name == 'product.product' and self.include_purchase and self._needs_native_product(record) and record.purchase_method != target.purchase_method:
             raise UserError('Product billing policy differs for %s. Choose matching bill-on-ordered or bill-on-received settings before moving purchase commitments.' % record.display_name)
         return target
 
@@ -47,8 +47,6 @@ class PurchaseDocumentJob(models.Model):
         extra = super()._extra_plan(issues)
         if not self.include_purchase:
             return extra
-        if not self.old_operations_frozen:
-            issues.append('Confirm old-company fulfilment will stop before activating new PO commitments.')
         orders = self.env['purchase.order'].search([('company_id', 'in', self.source_company_ids.ids),
             ('date_order', '<=', str(self.cutover_date) + ' 23:59:59')], order='id', limit=self.record_limit + 1)
         if len(orders) > self.record_limit:
@@ -62,11 +60,19 @@ class PurchaseDocumentJob(models.Model):
                 'remaining_billing': line.product_qty - line.qty_invoiced,
                 'pending_receipt': sum(m.product_uom._compute_quantity(m.product_uom_qty, line.product_uom_id) for m in line.move_ids if m.state not in ('done', 'cancel') and m.location_id.usage == 'supplier'),
                 'billable_now': line.qty_to_invoice} for line in order.order_line if not line.display_type]
-            info.append({'source': order.id, 'name': order.name, 'state': order.state, 'locked': order.locked, 'hash': self._fingerprint(order), 'details': self._record_details(order), 'lines': rows})
+            info.append({'source': order.id, 'name': order.name, 'state': order.state, 'locked': order.locked, 'lines': rows})
             try:
+                info[-1].update({'hash': self._fingerprint(order), 'details': self._record_details(order)})
                 claim=self.env['ir.config_parameter'].sudo().get_param('company_document_cutover.purchase.source.%s' % order.id)
                 if claim and int(claim)!=self.target_company_id.id:
                     raise UserError('PO %s already has a document transfer to another destination.' % order.name)
+                if self._audit_only(order):
+                    info[-1]['audit_only'] = True
+                    info[-1]['audit_hash'] = digest(self._purchase_snapshot(order))
+                    self._check_archive_order(order)
+                    continue
+                if order.state == 'purchase' and not self._has_history(order) and not self.old_operations_frozen:
+                    raise UserError('Confirm old-company fulfilment will stop before activating new PO commitments.')
                 self._target(order.partner_id)
                 self._target(order.payment_term_id)
                 if order.state not in ('draft', 'sent', 'purchase', 'cancel'):
@@ -118,6 +124,9 @@ class PurchaseDocumentJob(models.Model):
             stored = self._stored_link(source)
             if stored:
                 audit['links'].append(stored)
+                continue
+            if self._audit_only(source):
+                audit['links'].append(self._archive_purchase(source))
                 continue
             if self._has_history(source):
                 target, line_map = self._history_matches(source, final=True)
@@ -303,11 +312,7 @@ class PurchaseDocumentJob(models.Model):
                     dest = self._explicit(move)
                     if move.date.date() > self.cutover_date:
                         raise UserError('Receipt/return falls after the cutover date; choose a date covering the full history.')
-                    for history in (move, dest):
-                        if self.env['product.value'].search_count([('move_id', '=', history.id)]):
-                            raise UserError('Manual receipt valuation adjustments need additional history mapping.')
-                        if getattr(history, 'account_move_id', False):
-                            raise UserError('Stock valuation journal entries require separate accounting-history mapping; do not duplicate existing valuation balances.')
+                    self._verify_valuation_history(move, dest)
                     self._verify_tracked_receipt(move, dest)
                     if dest in mapped:
                         raise UserError('Two receipts/returns cannot use the same destination movement.')
@@ -325,10 +330,10 @@ class PurchaseDocumentJob(models.Model):
             if set(mapped.ids) != set(new.move_ids.filtered(lambda m: m.state == 'done').ids):
                 errors.append('PO %s, %s: destination receipt/return history contains unmatched movements.' % (order.name, old.name))
             pending = (old.move_ids | new.move_ids).filtered(lambda m: m.state not in ('done', 'cancel'))
-            if pending.filtered(lambda m: m.origin_returned_move_id or m.location_dest_id.usage == 'supplier'):
-                errors.append('PO %s: finish or explicitly resolve pending supplier returns before adopting history.' % order.name)
-            if pending.filtered(lambda m: m.location_id.usage != 'supplier' or m.location_dest_id.usage != 'internal'):
-                errors.append('PO %s: multi-step or nonstandard pending stock routes need additional commitment mappings.' % order.name)
+            try:
+                self._verify_pending_history(old, new)
+            except UserError as exc:
+                errors.append('PO %s: pending supplier returns and route history need review. %s' % (order.name, exc))
             errors.extend(self._pending_identity_issues(old) + self._pending_identity_issues(new))
             if float_compare(self._pending_demand(old), self._pending_demand(new), precision_rounding=old.product_uom_id.rounding):
                 errors.append('PO %s, %s: remaining native receipt commitment differs.' % (order.name, old.name))
@@ -358,6 +363,12 @@ class PurchaseDocumentJob(models.Model):
         return target, {str(old.id): new.id for old, new in pairs}
 
     def _check_purchase_line(self, line, all_moves):
+        order = line.purchase_line_id.order_id
+        if self._audit_only(order):
+            if order.company_id not in self.source_company_ids or order.date_order.date() > self.cutover_date:
+                raise UserError('Bill/PO line links reach outside selected purchase history.')
+            self._check_archive_order(order)
+            return
         if not self.include_purchase:
             stored = self._stored_link(line.move_id)
             if stored:
@@ -375,7 +386,6 @@ class PurchaseDocumentJob(models.Model):
                 except (KeyError, TypeError, ValueError):
                     pass
             return super()._check_purchase_line(line, all_moves)
-        order = line.purchase_line_id.order_id
         if order.company_id not in self.source_company_ids or order.date_order.date() > self.cutover_date:
             raise UserError('Bill/PO line links reach outside selected purchase history.')
         self._explicit(order)
@@ -390,14 +400,18 @@ class PurchaseDocumentJob(models.Model):
         if not lines:
             return super()._copy_move(source)
         targets = self.env['purchase.order.line']
+        products = self.env['product.product']
         for line in lines:
-            targets |= self._explicit(line)
+            if not self._audit_only(line.order_id):
+                targets |= self._explicit(line)
+            products |= self._target(line.product_id)
         def stock_evidence():
             return {
-                'moves': self.env['stock.move'].search([('company_id', '=', self.target_company_id.id), ('product_id', 'in', targets.product_id.ids)], order='id').read([
+                'moves': self.env['stock.move'].search([('company_id', '=', self.target_company_id.id), ('product_id', 'in', products.ids)], order='id').read([
                     'quantity', 'product_uom_qty', 'state', 'value', 'price_unit',
                     'account_move_id', 'location_id', 'location_dest_id', 'origin_returned_move_id']),
-                'costs': targets.product_id.with_company(self.target_company_id).sorted('id').read(['standard_price', 'cost_method', 'valuation']),
+                'costs': products.with_company(self.target_company_id).sorted('id').read(['standard_price', 'cost_method', 'valuation']),
+                'quants': self.env['stock.quant'].search([('company_id', '=', self.target_company_id.id), ('product_id', 'in', products.ids)], order='id').read(['product_id', 'location_id', 'lot_id', 'owner_id', 'package_id', 'quantity', 'reserved_quantity']),
                 'manual_values': self.env['product.value'].search([('company_id', '=', self.target_company_id.id)], order='id').read(['product_id', 'lot_id', 'move_id', 'value', 'date']),
             }
         before = stock_evidence()
@@ -411,7 +425,7 @@ class PurchaseDocumentJob(models.Model):
     def _invoice_values(self, move):
         values = super()._invoice_values(move)
         for line, command in zip(move.invoice_line_ids, values['invoice_line_ids']):
-            if line.purchase_line_id:
+            if line.purchase_line_id and not self._audit_only(line.purchase_line_id.order_id):
                 command[2]['purchase_line_id'] = self._explicit(line.purchase_line_id).id
         return values
 
@@ -421,6 +435,6 @@ class PurchaseDocumentMapping(models.Model):
     _history_choices = [('purchase.order', 'Existing purchase order'),
                         ('purchase.order.line', 'Existing purchase order line'),
                         ('stock.move', 'Completed receipt or return')]
-    source_record = fields.Reference(selection_add=_history_choices, ondelete={key: 'cascade' for key, label in _history_choices})
-    target_record = fields.Reference(selection_add=_history_choices, ondelete={key: 'cascade' for key, label in _history_choices})
-    model_name = fields.Selection(selection_add=_history_choices, ondelete={key: 'cascade' for key, label in _history_choices})
+    source_record = fields.Reference(selection_add=_history_choices, ondelete={key: remove_optional_document_matches for key, label in _history_choices})
+    target_record = fields.Reference(selection_add=_history_choices, ondelete={key: remove_optional_document_matches for key, label in _history_choices})
+    model_name = fields.Selection(selection_add=_history_choices, ondelete={key: remove_optional_document_matches for key, label in _history_choices})

@@ -6,6 +6,7 @@ from psycopg2.errors import LockNotAvailable
 from odoo import api, fields, models, Command
 from odoo.exceptions import AccessError, UserError, ValidationError
 from odoo.tools import SQL
+from odoo.addons.base.models.ir_model import MODULE_UNINSTALL_FLAG
 from odoo.addons.company_financial_cutover.models.cutover import FinancialCutover
 
 _TOKEN = object()
@@ -19,6 +20,13 @@ def packed(value):
 
 def digest(value):
     return hashlib.sha256(packed(value).encode()).hexdigest()
+
+
+def remove_optional_document_matches(records):
+    """Native uninstall removes only addon-owned choices, retaining job receipts."""
+    if not records.env.is_system() or not records.env.context.get(MODULE_UNINSTALL_FLAG):
+        raise AccessError('Optional choices may be removed only during native addon uninstall.')
+    return records.with_context(_document_capability=_TOKEN).unlink()
 
 
 class DocumentJob(models.Model):
@@ -91,6 +99,8 @@ class DocumentJob(models.Model):
             data = json.loads(raw)
             target = self.env[record._name].browse(data['target']).exists()
             target.check_access('read')
+            if record._name == 'account.move':
+                self._check_external_target(target)
             if (len(target) != 1 or target.company_id != self.target_company_id or
                     record.company_id not in self.source_company_ids or data.get('source') != record.id or data.get('model') != record._name):
                 raise UserError('Saved document ownership or company differs. Review the original receipt before reuse.')
@@ -203,10 +213,13 @@ class DocumentJob(models.Model):
                 self._target(tax)
             if 'purchase_line_id' in line._fields and line.purchase_line_id:
                 self._check_purchase_line(line, all_moves)
-        if getattr(move, 'stock_move_ids', False):
-            raise UserError('Bank-statement/stock-valuation history needs additional native history mappings: %s.' % move.display_name)
+        self._check_stock_history(move)
+        if getattr(move, 'transaction_ids', False):
+            raise UserError('Recorded payment-provider history needs a provider-specific, read-only adoption adapter: %s. No online payment will be created or charged.' % move.display_name)
         if getattr(move, 'edi_document_ids', False):
             raise UserError('Electronic invoicing history requires localization review: %s.' % move.display_name)
+        if getattr(self._target(move.journal_id), 'edi_format_ids', False) and not self._is_reused(move):
+            raise UserError('The new-company journal would start electronic-invoice processing for %s. Use a verified existing document or review the localization before copying.' % move.display_name)
         if move.move_type == 'entry' and not move.tax_cash_basis_rec_id and (move.line_ids.tax_ids or move.line_ids.tax_line_id or move.line_ids.tax_tag_ids):
             raise UserError('Tax-reporting manual journal entries require repartition/tag mapping: %s.' % move.display_name)
         partials = move.line_ids.matched_debit_ids | move.line_ids.matched_credit_ids
@@ -219,7 +232,9 @@ class DocumentJob(models.Model):
             raise UserError('Destination locked date affects %s; unlock only after accountant approval.' % move.display_name)
         payment = move.origin_payment_id
         if payment:
-            if payment.payment_method_id.code != 'manual' or payment.paired_internal_transfer_payment_id or payment.state not in ('in_process', 'paid'):
+            if (payment.payment_method_id.code != 'manual' or payment.paired_internal_transfer_payment_id or
+                    getattr(payment, 'payment_transaction_id', False) or getattr(payment, 'payment_token_id', False) or
+                    getattr(move, 'transaction_ids', False) or payment.state not in ('in_process', 'paid')):
                 raise UserError('Only posted, journal-backed manual accounting payments are supported: %s.' % payment.display_name)
             methods = self.env['account.payment.method.line'].search([('journal_id', '=', journal.id),
                 ('payment_method_id.code', '=', 'manual'), ('payment_type', '=', payment.payment_type)])
@@ -270,6 +285,17 @@ class DocumentJob(models.Model):
 
     def _check_purchase_line(self, line, all_moves):
         raise UserError('Bill/PO line links need the received/billed purchase-history mapping dependency: %s.' % line.move_id.display_name)
+
+    def _check_stock_history(self, move):
+        if getattr(move, 'stock_move_ids', False):
+            raise UserError('Stock valuation accounting needs verified existing history. Current stock may already be represented in new-company opening balances; do not add its original valuation entries again: %s.' % move.display_name)
+
+    def _check_external_target(self, target):
+        if (getattr(target, 'transaction_ids', False) or getattr(target, 'edi_document_ids', False) or
+                getattr(target.origin_payment_id, 'payment_transaction_id', False) or
+                getattr(target.origin_payment_id, 'payment_token_id', False) or
+                target.origin_payment_id.paired_internal_transfer_payment_id):
+            raise UserError('Existing provider, internal-transfer or electronic-invoice history needs a specialized read-only adoption adapter before reuse.')
 
     def _mapping_config(self, record):
         if record._name == 'account.move':
@@ -345,9 +371,16 @@ class DocumentJob(models.Model):
                 issues.append(str(exc))
         try:
             self._check_existing_reconciliations(moves)
+            self._check_read_only_history(moves)
         except UserError as exc:
             issues.append(str(exc))
         extra = self._extra_plan(issues)
+        def evidence(record, reader):
+            try:
+                return reader(record)
+            except UserError as exc:
+                issues.append(str(exc))
+                return {'unavailable': str(exc)}
         # Digest all input mappings, native configuration and pre-existing destination ledger.
         configs = {}
         for row in self.mapping_ids:
@@ -365,14 +398,14 @@ class DocumentJob(models.Model):
                         'account.payment.term': ['name','company_id','line_ids'],
                         'account.move': None,
                     }.get(row.model_name)
-                    configs['%s:%s' % (row.model_name, r.id)] = r.read(names + (['purchase_method'] if row.model_name == 'product.product' and 'purchase_method' in r._fields else []))[0] if names else self._mapping_config(r)
+                    configs['%s:%s' % (row.model_name, r.id)] = r.read(names + (['purchase_method'] if row.model_name == 'product.product' and 'purchase_method' in r._fields else []))[0] if names else evidence(r, self._mapping_config)
                     if row.model_name == 'account.tax':
                         configs['taxrep:%s' % r.id] = (r.invoice_repartition_line_ids | r.refund_repartition_line_ids).read(['repartition_type','factor_percent','account_id','tag_ids'])
                     if row.model_name == 'account.payment.term':
                         configs['terms:%s' % r.id] = r.line_ids.read(['value','value_amount','nb_days','delay_type','days_next_month'])
         destination = self.env['account.move'].search([('company_id', '=', target.id)])
         data = {'source': sorted(source.ids), 'target': target.id, 'cutover': str(self.cutover_date),
-            'moves': [(m.id, self._fingerprint(m), self._record_details(m)) for m in moves],
+            'moves': [(m.id, evidence(m, self._fingerprint), evidence(m, self._record_details)) for m in moves],
             'payments': [(p.id, self._fingerprint(p)) for p in payments],
             'limits': [self.batch_size, self.record_limit, self.allow_incremental],
             'mappings': self.mapping_ids.read(['model_name', 'source_id', 'target_id']), 'config': configs,
@@ -382,7 +415,7 @@ class DocumentJob(models.Model):
                 'currency_exchange_journal_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id']),
             'rates': self.env['res.currency.rate'].search([]).read(['name', 'company_id', 'currency_id', 'rate']),
             'overlaps': self.overlap_ids.read(['source_move_id', 'target_move_id', 'separate', 'reason']),
-            'destination': [(m.id, self._fingerprint(m), self._record_details(m)) for m in destination], 'extra': extra}
+            'destination': [(m.id, evidence(m, self._fingerprint), evidence(m, self._record_details)) for m in destination], 'extra': extra}
         return moves, extra, sorted(set(issues)), digest(data)
 
     def action_review(self):
@@ -420,21 +453,29 @@ class DocumentJob(models.Model):
             details.append('Purchase %s (%s):' % (order['name'],order['state'] + ('; locked' if order.get('locked') else '')))
             if order.get('history_target'):
                 details.append('  Reuse verified existing PO, receipts and returns; no new delivery commitment will be created.')
+            if order.get('audit_only'):
+                details.append('  History only: retain original documents and quantities for reference. Current stock stays unchanged. No live PO, receipt or supplier commitment will be created.')
             for line in order['lines']:
                 details.append('  %s (%s): ordered %s; received %s; billed %s; ordered less net received %s; ordered less billed %s.' %
                     (line['description'],line['unit'],line['ordered'],line['received'],line['billed'],line['remaining_delivery'],line['remaining_billing']))
                 if 'pending_receipt' in line:
-                    details.append('    Open receipt commitments: %s. Quantity available to bill now: %s. Returns do not automatically create replacement receipts.' % (line['pending_receipt'],line['billable_now']))
+                    details.append('    %sOpen receipt commitments: %s. Quantity available to bill now: %s. Returns do not automatically create replacement receipts.' % ('In the old company only — ' if order.get('audit_only') else '',line['pending_receipt'],line['billable_now']))
         self._system_write({'state': 'blocked' if issues else 'ready', 'preview_hash': signature if not issues else False,
             'report': ('Choices to resolve:\n' + '\n'.join('• ' + i for i in issues) + '\n\n' if issues else '') + '\n'.join(details)})
         return True
 
     def _lock_tables(self):
-        return ('account_move', 'account_move_line', 'account_partial_reconcile', 'account_full_reconcile',
+        tables = ('account_move', 'account_move_line', 'account_partial_reconcile', 'account_full_reconcile',
             'account_payment', 'account_payment_method_line', 'account_account', 'account_journal', 'res_partner',
             'res_company', 'res_currency', 'res_currency_rate', 'account_tax', 'account_tax_repartition_line',
             'account_payment_term', 'account_payment_term_line', 'product_product', 'product_template',
             'ir_config_parameter', 'ir_attachment', 'company_document_cutover', 'company_document_mapping', 'company_document_overlap')
+        optional = tuple(self.env[model]._table for model in ('payment.transaction', 'payment.token', 'payment.provider',
+            'account.edi.document', 'account.edi.format') if model in self.env)
+        relations = tuple(self.env[model]._fields[name].relation for model, name in (
+            ('account.move', 'transaction_ids'), ('account.journal', 'edi_format_ids'))
+            if name in self.env[model]._fields)
+        return (*tables, *optional, *relations)
 
     def _lock(self):
         self.env.flush_all()
@@ -548,7 +589,7 @@ class DocumentJob(models.Model):
         self._operator()
         if self.state == 'done':
             # The immutable attachment and durable links outlive module uninstall.
-            payload = json.loads(self.audit_attachment_id.raw)
+            payload = json.loads(self.audit_attachment_id.with_context(bin_size=False).raw)
             for data in payload['links']:
                 original=self.env[data['model']].browse(data['source']).exists()
                 if len(original)!=1:
@@ -711,6 +752,8 @@ class DocumentMapping(models.Model):
         return result
 
     def unlink(self):
+        if self.env.context.get('_document_capability') is _TOKEN:
+            return super().unlink()
         self._guard()
         self.job_id._system_write({'state': 'draft', 'preview_hash': False})
         return super().unlink()

@@ -5,7 +5,7 @@
     "company_financial_cutover": "19.0.1.1.1"
   },
   "candidate_safety_base": "882b60b857c03f38a17563eb8638bd4f75e29c73",
-  "note": "Exact supplied package retained. Candidate includes existing reviewed fixes from safety base plus new document extension. Git checkout unchanged.",
+  "note": "Original supplied package retained separately; candidate extends the reviewed safety base on an isolated development branch.",
   "supplied_file_sha256": {
     "INSTALL.txt": "0b66b22d268c4b21137a584e9ad28f80a699c05c563c6d521bd874db04900575",
     "README.md": "bbc7694e6940d06f2b8611afc7eb1b47bca2301cebf0472e88936763316a753d",
@@ -51,7 +51,7 @@
     "company_stock_fifo_migration/views/migration_views.xml": "38ee3dbfd182d3da139aa45ca7d1c69513f9d0a650928b8080737deb883d55c4",
     "company_stock_fifo_migration/views/warehouse_cutover_views.xml": "29f4bc9fbc7d7f7755f75d764e303dfc95018bc455c5b160626bc28316c13e38"
   },
-  "candidate_document_version": "19.0.0.4.0",
+  "candidate_document_version": "19.0.0.5.0",
   "candidate_financial_version": "19.0.3.1.1",
   "stock_policy": "Exact original supplied stock source; not executed. Repository keeps newer stock source."
 }

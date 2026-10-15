@@ -1,53 +1,72 @@
 {
-  "version": "19.0.0.4.0",
+  "version": "19.0.0.5.0",
   "test_only": true,
-  "native_full_checkpoint": {
+  "final_native_full": {
     "status": "PASS",
-    "tests": 235,
-    "log": "fifo_doc_repeat_20261015093055_576994.log"
+    "tests": 266,
+    "log": "archive-release-full.log"
   },
   "final_accounting_without_purchase": {
     "status": "PASS",
-    "tests": 49,
-    "log": "gaps-final-accounting-only.log"
+    "tests": 55,
+    "log": "archive-release-accounting-only.log"
   },
-  "final_ownership_guards": {
+  "final_affected_regressions": {
     "status": "PASS",
-    "tests": 4,
-    "log": "gaps-final-ownership.log"
+    "tests": 25,
+    "log": "archive-final-optional-regressions.log"
+  },
+  "external_boundaries": {
+    "status": "PASS",
+    "tests": 5,
+    "log": "archive-external-final.log"
   },
   "chromium_desktop_phone": {
     "status": "PASS",
-    "tests": 2,
-    "log": "browser-fifo_doc_repeat_20261015093055_576994-20261015093709.log"
+    "tests": 4,
+    "log": "browser-fifo_doc_repeat_20261015112659_586129-20261015114925.log"
   },
   "stock_mover_executed": false,
   "production_accessed": false,
-  "limits": "Missing stock/valuation reconstruction, provider/EDI/internal payments, complex routes and real-data certification remain unsupported.",
-  "count_note": "Overlapping runs, not additive. Full checkpoint precedes final ownership hardening; final accounting/targeted/UI runs exercise final code.",
+  "limits": "Missing history retained as audit-only, no new live delivery commitment; missing native stock reconstruction, provider/EDI/internal/statement-generated payment adapters and real-data certification remain outside tested support.",
+  "count_note": "Overlapping runs, not additive. Final full/accounting runs include all runtime corrections, browser blob handling and optional-only recovery.",
   "simulation": {
     "status": "PASS",
-    "evidence": "gaps-simulation.json"
+    "evidence": "archive-simulation.json"
   },
-  "absent": {
+  "both_addons_absent": {
     "status": "PASS",
-    "evidence": "gaps-survival-absent.json"
+    "evidence": "archive-survival-absent.json"
   },
-  "reinstalled_resume": {
+  "both_addons_reinstalled_resume": {
     "status": "PASS",
-    "evidence": "gaps-survival-reinstalled.json"
+    "evidence": "archive-survival-reinstalled.json"
+  },
+  "final_readback": {
+    "status": "PASS",
+    "evidence": "archive-final-readback.json"
+  },
+  "optional_purchase_only_recovery": {
+    "status": "PASS",
+    "evidence": "archive-optional-survival.json"
+  },
+  "independent_readback": {
+    "status": "PASS",
+    "evidence": "independent-v5-readback.json"
   },
   "runtime_hashes": {
     "company_document_cutover/models/__init__.py": "498d04b5c6c9702e61da710f51d0cf0e972e29b234fd8a9fdefd64e82d83cab4",
     "company_document_cutover/models/accounting.py": "7fc5c2e6c154dd0528dd089ee36611e5d5ee7f789dfbcd895adb1652b31852f4",
-    "company_document_cutover/models/banking.py": "313b62ef3315772d01869dd067e0427d5546a677a0e980d464b6b40eab359482",
+    "company_document_cutover/models/banking.py": "cc0879733b4b69427bfe2414838f3bd879994f9a008a60d3fc3835fab59bc063",
     "company_document_cutover/models/choices.py": "e55ea4798d8f7bf70b0c3046d60ae9481debf45f30f10f962f10d07aff487469",
-    "company_document_cutover/models/history.py": "67dcc0a6973d282ed1cbdc1dbce182a79a3648104607a99fee6100460537fe75",
-    "company_document_cutover/models/migration.py": "f6c4ef856a00d20f2df5badbdf697f2515645c0a4a3ba98986a6e07ea7ba0944",
+    "company_document_cutover/models/history.py": "09d2e7f11dc83751eb7e34469db43bf4a53f700e5b750a23553fe7a89cb77824",
+    "company_document_cutover/models/migration.py": "d7d763df1b5e7d27ce9df5c0b8d1f9ab95a4b17aa7c5a463dfd9e42cbd52cb76",
     "company_document_cutover/models/reconciliation.py": "f1de0c9a80d33865d2fcd08d3a354005d363c776cdab54de9a23341913b74f35",
-    "company_document_purchase_cutover/models/__init__.py": "10f2069f39e1cf811f7f92a4645e4a44f96d5add111159dda345afd3508c118a",
-    "company_document_purchase_cutover/models/purchase.py": "332926119d4b6e0b4d25a86f8ed4a3989e174caf393c5146350b59ed08c11168",
-    "company_document_purchase_cutover/models/tracking.py": "62b7079389dc42f4fc03e7e3a35a387fcc71e9d2f199058d7bde072083c6c36e",
+    "company_document_purchase_cutover/models/__init__.py": "3999130b44a38b43b6e0899869b79c1d5f7880327b9442ad6ccda4178689b66a",
+    "company_document_purchase_cutover/models/archive.py": "2ca5b5d8676fa1a9721e62659ca85c6c49c51389d7b38b899f383a075e029281",
+    "company_document_purchase_cutover/models/native_history.py": "826e0685c06a28237a7d155fd73ea5182a34493a194b4868fba321aaddb90ad1",
+    "company_document_purchase_cutover/models/purchase.py": "ba5d0efe9099a8c90559e108282f4cb97c61a7102a6180e6a61fcb6ac572a13b",
+    "company_document_purchase_cutover/models/tracking.py": "4d34a7ad0a09b9cf71dffd721fd5b3492d476c52706e1a02aaaeeed42ea0f084",
     "company_financial_cutover/models/cutover.py": "b5c64405e5f141539d8826ba16d6be9a0b04fadcde63d4dab1d7eb1157431619"
   }
 }

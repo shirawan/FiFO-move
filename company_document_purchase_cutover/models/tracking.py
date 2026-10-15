@@ -2,7 +2,7 @@
 from collections import Counter
 from odoo import fields, models
 from odoo.exceptions import UserError
-from odoo.addons.company_document_cutover.models.migration import packed
+from odoo.addons.company_document_cutover.models.migration import packed, remove_optional_document_matches
 
 
 class TrackedPurchaseHistory(models.Model):
@@ -12,7 +12,7 @@ class TrackedPurchaseHistory(models.Model):
         target = super()._target(record)
         if not record:
             return target
-        if record._name == 'product.product' and self.include_purchase and record.tracking != target.tracking:
+        if record._name == 'product.product' and self.include_purchase and self._needs_native_product(record) and record.tracking != target.tracking:
             raise UserError('Product lots/serials tracking differs. Match products with the same tracking policy.')
         if record._name == 'stock.lot':
             if target.product_id != self._target(record.product_id) or target.name != record.name:
@@ -63,6 +63,6 @@ class TrackedHistoryMapping(models.Model):
     _inherit = 'company.document.mapping'
     _tracking_choices = [('stock.lot','Existing lot or serial number'), ('stock.location','Stock location'),
                          ('stock.package','Existing package')]
-    source_record = fields.Reference(selection_add=_tracking_choices, ondelete={k:'cascade' for k,v in _tracking_choices})
-    target_record = fields.Reference(selection_add=_tracking_choices, ondelete={k:'cascade' for k,v in _tracking_choices})
-    model_name = fields.Selection(selection_add=_tracking_choices, ondelete={k:'cascade' for k,v in _tracking_choices})
+    source_record = fields.Reference(selection_add=_tracking_choices, ondelete={k:remove_optional_document_matches for k,v in _tracking_choices})
+    target_record = fields.Reference(selection_add=_tracking_choices, ondelete={k:remove_optional_document_matches for k,v in _tracking_choices})
+    model_name = fields.Selection(selection_add=_tracking_choices, ondelete={k:remove_optional_document_matches for k,v in _tracking_choices})

@@ -29,6 +29,7 @@ class TestPurchaseDocuments(FinancialCutoverCase):
         return order
 
     def _purchase_job(self,old,new,**options):
+        options.setdefault('purchase_history_mode','native')
         job=self._job(include_accounting=False,include_purchase=True,old_operations_frozen=True,**options)
         self._match(job,old,new)
         return job

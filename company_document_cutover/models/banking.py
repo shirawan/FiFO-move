@@ -62,6 +62,8 @@ class BankHistory(models.Model):
             if old and (old.amount != new.amount or old.foreign_currency_id != new.foreign_currency_id or
                         old.amount_currency != new.amount_currency or old.payment_ref != new.payment_ref):
                 raise UserError('Existing native bank transaction details differ.')
+            if new.payment_ids:
+                raise UserError('Existing statement-generated payment links need explicit read-only history adoption before reuse.')
         return target, lines
 
     def _after_copies(self, targets):

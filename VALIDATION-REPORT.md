@@ -1,91 +1,128 @@
-# Validation report — 19.0.0.4.0, 15 October 2026 UTC
+# Validation report — 19.0.0.5.0, 15 October 2026 UTC
 
-This is a test candidate. It extends supported document migration; it does not certify
-production, arbitrary custom modules or complete reconstruction of missing stock history.
+This candidate implements the selected **preserve current stock and retain missing history
+for reference** option. It does not reconstruct missing native receipts or make historical
+outstanding quantities into new supplier commitments.
 
-## Changes and gap status
+| Area | Status and evidence |
+| --- | --- |
+| Missing historical PO/receipt/return history | PASS as immutable audit snapshots; no native PO, done move or received quantity invented |
+| Original bills linked to audit-only POs | PASS: native accounting posting, durable original PO/line references; no fabricated purchase_line_id |
+| Existing manual valuation / valuation journal history | PASS for explicit existing matches; no new adjustment or valuation posting |
+| Existing pending returns and multi-step routes | PASS for complete one-to-one native graph matches, quantities, dates, values and edges |
+| Current stock and original source | PASS in native regressions, committed simulation and independent SQL readback |
+| Existing destination transactions / earlier transfers | PASS for verified reuse, duplicate-pair decisions and unchanged unrelated trading |
+| Interrupted steps, retries, removal and reinstall | PASS: actual native uninstall/reinstall/resume; no duplicate records |
+| Nontechnical UI | PASS: explicit stock-preserving choice, old-company follow-up quantities, read-only history screen; desktop/phone Chromium |
+| Company access | PASS: every covered company required for archive read, cross-company bill scope rejected, read-only valuation ACLs retain company rules |
+| Browser blob handling / damaged markers | PASS: binary-size context, exact download bytes, safe accountant-review message |
+| Provider/token, EDI, paired internal transfers, statement-generated payments | BLOCKED pending specialized native-history adapters; source and target safety boundaries tested |
+| Missing native stock reconstruction / automatic remaining-delivery draft for audit-only history | NOT IMPLEMENTED; outside the chosen audit-only method |
+| Real data, custom localizations, production-size timing | NOT TESTED; restored-copy validation required |
 
-| Prior gap | Current result |
-|---|---|
-| Existing unmarked accounting copies | Implemented explicit verified adoption, including native payments and bill/PO links; no automatic similarity merge |
-| 200-record ceiling | Replaced by resumable steps, default 100 records; native 201-document and 201-PO tests; up to 50,000 review bound, not performance certification |
-| Incremental continuation | Additional independent history supported explicitly; edits/new matches on already moved history still require review |
-| Recovery after uninstall | New receipts include settings and all choices; automatic completed/partial recovery; corrupt receipts isolated |
-| Analytic allocations | Explicit plan/account mapping and native analytic amount verification |
-| Fiscal positions and cash rounding | Explicit configuration matching and native posting checks |
-| Foreign partial manual payments | Native regression added |
-| Exchange/cash-basis history | Native generated-entry matching and exactly-once coverage for tested scenarios |
-| Bank statements | Native statement grouping/line posting/reconciliation; entire statements required; generated-payment collections remain unsupported |
-| Lots/serials/owners/packages | Verified reuse of existing native detailed history, without changing inventory |
-| Missing destination stock history | Still requires complete movement/valuation reconstruction and existing-opening reconciliation; not implemented |
-| Production/Enterprise/custom localization/large-data timings | Requires a restored copy and installed modules; not certified |
+## Native runtime and exact baseline
 
-## Runtime and evidence
+Odoo Community 19 commit `9ec2b55d3fa343e6547a9db54d5f3f5c776c535d`, Python 3.12,
+PostgreSQL 17, Chromium 151. Isolated Unix socket
+`/workspace/fifo-document-work/runtime/socket`, port 55433, PostgreSQL
+`listen_addresses=''`; no production connection. The simulation asserts no outgoing mail
+servers or enabled payment providers and disables crons. The stock-migration addon is not
+installed or executed. Synthetic receipts/returns are fixture setup only.
 
-Odoo 19 Community commit `9ec2b55d3fa343e6547a9db54d5f3f5c776c535d`, Python 3.12,
-PostgreSQL 17.11. Dedicated PostgreSQL socket port 55433, empty TCP listen address, own
-`/workspace/fifo-document-work/runtime/pgdata`. Scheduled jobs disabled during committed
-simulation, no outgoing mail servers or enabled payment providers. Stock mover not installed.
+The exact supplied ZIP SHA-256 remains
+`4e27269b39fa2ad0fb215cfdc52f870e250fb228455a17be6fd8c78b6d0d8d15`.
+`BASELINE.json` retains supplied file hashes. Document addons are 19.0.0.5.0; financial
+19.0.3.1.1 and legacy optional purchase 19.0.3.1.0. The installer retains the exact supplied
+stock source (19.0.2.7.4), unchanged and untested; the Git repository retains its newer stock
+fixes. The patch applies against the exact supplied extracted baseline.
 
-Executed current-release outcomes (overlapping runs, not additive):
+## Test evidence
 
-| Check | Result | Evidence |
-|---|---|---|
-| Fresh complete four-addon suite | PASS 235, zero failures/errors | fifo_doc_repeat_20261015093055_576994.log |
-| Final accounting suite with Purchase absent | PASS 49, zero failures/errors | gaps-final-accounting-only.log |
-| Final ownership/adoption/continuation guards | PASS 4, zero failures/errors | gaps-final-ownership.log |
-| Actual desktop and phone Chromium workflows | PASS 2, no skips | browser-fifo_doc_repeat_20261015093055_576994-20261015093709.log |
-| Committed A+B+C, earlier-copy adoption, existing new-company trading | PASS, five saved steps | gaps-simulation.json |
-| Actual native uninstall and absent-addon readback | PASS, unchanged business IDs/private receipts | gaps-uninstall.log; gaps-survival-absent.json |
-| Automatic completed/partial recovery and exactly one remaining invoice | PASS | gaps-survival-reinstalled.json |
+These are overlapping checks, not counts to add together. Native Odoo runs execute actual
+ORM, accounting posting/reconciliation, PostgreSQL savepoints/locks and installed views.
+Some tests inject faults or poison external hooks; they do not simulate successful provider
+operations or replace the native accounting engine.
 
-The full 235-test checkpoint precedes the last ownership-marker hardening; the final
-49 accounting-only tests and four targeted tests exercise those final changes. The browser
-runner also executes against the final code. RELEASE-VALIDATION.json records filenames,
-results and current critical runtime hashes. Earlier checkpoint: 228 native tests passed in a fresh database
-(`fifo_doc_repeat_20261015091335_574299.log`). A later 234-test run found one stale assertion:
-the edited-evidence review now returns a combined blocked report instead of a popup error.
-The test was updated to require blocked review, failed confirmation and no extra copy.
-It was not changed to accept altered accounting evidence.
+| Run | Result | Evidence file |
+| --- | --- | --- |
+| All four relevant addons, optional EDI installed | 266 PASS, no failed/error tests | archive-release-full.log |
+| Accounting without Purchase, optional EDI installed | 55 PASS | archive-release-accounting-only.log |
+| Final affected archive/native-history/recovery cases | 25 PASS | archive-final-optional-regressions.log |
+| Optional native provider/EDI safety boundaries | 5 PASS, no skips | archive-external-final.log |
+| Desktop/phone accounting + history screens | 4 PASS, six real browser page flows | final browser log in evidence ZIP |
+| Final restored-job read/download/retry | PASS; all native rows/write dates unchanged | archive-final-readback.json |
+| Independent committed SQL readback | PASS | independent-v5-readback.json |
 
-Chromium 151 desktop (1440×1000) and phone (390×844): both real browser workflows passed
-in `gaps-browser-v4.log`; desktop exercises two confirmed steps, phone one confirmation.
-Earlier skipped browser tests lacked websocket-client; installed pinned 1.8.0, then reran.
-Earlier browser attempts exposed a mobile toolbar ordering issue and own-transaction false
-freshness failures in Odoo's shared HTTP test cursor. The guard now considers committed
-external versions, retaining real concurrency detection. Native retry/concurrent-change
-regressions are included in the complete suite. Failed/interrupted logs remain evidence.
+The release runs include the final browser binary-size and optional-only recovery fixes.
+The 25-case affected run covers exact downloads, damaged marker rendering, recursive stock
+evidence, permissions, complete recovery and recovery on retained jobs after optional-only
+removal. Chromium exercises the corrected screen. All named runs have zero failed/error
+tests. Earlier failed development runs are diagnostic evidence and are superseded by these
+results.
+Reproduce the basic suite with `bash tools/test_documents.sh`; it creates and backs up a
+fresh disposable database. The optional EDI cases skip when that optional app is absent.
+Use `bash tools/test_document_external.sh <fifo_doc_repeat_database>` to require all five
+external-boundary cases with native EDI installed. Use
+`bash tools/test_document_ui.sh <fifo_doc_repeat_database>` to require four Chromium tests
+and six successful page flows. The final combined run additionally installed `account_edi`
+and tested all four addons, excluding the separately run `document_browser` tag.
 
-## Committed simulation and recovery
+## Committed simulation and actual uninstall/reinstall
 
-`gaps-simulation.py/.json/.log` builds old A+B+C and standalone new A with existing trading,
-an already-copied invoice and a separate similar sale. It adopts the earlier copy, keeps the
-accountant's separate-transaction reason, and confirms multiple steps across real commits.
-Original source records, unrelated trading, native stock quantities/values and costs remain
-unchanged. The historical PO retains ordered10, receipt4, return1, net received3, net billed2,
-currently billable1 and pending incoming6. Destination posted balances: AR327, cash150,
-AP−178, revenue−677, expense378, equity0; trial balance net0, profit299.
+`archive-simulation.py` builds old A with branches B/C and a standalone already-trading
+new A. It includes unpaid/partial/paid invoices and bills, credits, manual accounting
+payments, native untouched RFQs/POs and a historical order with receipts, a return, two
+bills and a credit. The new company already has stock 17 and unrelated trading.
 
-A second incremental job saves one sale11 and leaves sale22 pending. A backed-up clone
-actually uninstalls both document addons. Native IDs and original private receipts are
-compared while absent. Reinstall restored both jobs automatically, including all matches and reasons, then resumed
-exactly one remaining invoice. Native IDs and receipts stayed identical until that resume. Final expected balances:
-AR360, cash150, AP−178, revenue−710, expense378, equity0; net0, profit332.
-See `gaps-survival-*.json` and uninstall/absent/reinstall logs for the executed outcome.
+The original historical order has ordered 10, net received 3, net billed 2, billable 1 and
+pending supplier delivery 6. The first related financial step atomically saves its complete
+audit snapshot. The job is deliberately left partial, then cloned and backed up before
+actual addon removal. Native accounting, PO, stock and private historical/partial receipt
+records retain their IDs and contents while the addons are absent. Reinstall reconstructs
+the history screen and choices automatically; resuming finishes exactly once.
 
-## Practical limits
+Independent SQL sums after resume:
 
-Adoption requires matching native accounting dates, ledger content and configuration;
-renumbering/reference differences are retained. Similarity review cannot prove identity of
-arbitrarily edited imports or clean up duplicated business events inside source history.
-New independent incremental history is supported; reinterpreting already changed history is
-not. Complete connected groups may exceed step size. Locks/freshness still scan locked
-tables, so batching does not replace a restored-database performance rehearsal.
+| Account | Balance |
+| --- | ---: |
+| Receivable | 227 |
+| Bank | 150 |
+| Payable | -178 |
+| Revenue | -577 |
+| Expense | 378 |
+| Equity entries in this fixture | 0 |
+| Total | 0 |
 
-Missing stock/valuation history, manual stock valuation, stock valuation journals, pending
-supplier returns, complex routes, EDI/provider/internal payments, manual tax-reporting journal
-adapters and localization-specific legal behavior remain outside tested automatic replay.
-The supplied stock addon itself is not executed; newer repository stock source is preserved.
-Historical independent review in INDEPENDENT-REVIEW.md covers 19.0.0.3.0 only. This release
-was validated through the documented native/browser/survival checks; no new independent
-review is claimed.
+P&L and balance-sheet net profit both equal 199. Existing stock remains 17. All 43 saved
+stock moves, 43 lines, 23 quants and 12 product-value rows are unchanged. Three historical
+bills have distinct native target IDs and no fabricated native PO links. Only the three
+untouched orders are new native POs; one audit-only historical record is present. Its old
+pending deliveries remain follow-up information, not active destination commitments.
+
+Evidence: archive-simulation.json, archive-survival-absent.json,
+archive-survival-reinstalled.json, archive-final-readback.json, independent-v5-readback.json,
+and their reproducible scripts/logs. A second backed-up clone verifies uninstalling only the
+optional purchase document addon: existing base-job IDs/states, every native row ID/write
+date and original private records survive; reinstall restores the screen, selection and
+one-to-one PO/line/stock/lot/location/package/manual-value matches. Evidence:
+archive-optional-survival.json and archive-optional-native-fixture.json. Database dumps and filestores stay local and are not
+included in the distributable bundle.
+
+## Review, limitations and rollout boundary
+
+An independent reviewer challenged company coverage, recursive route valuation/evidence,
+external target gates, read permissions and the browser blob crash. All confirmed findings
+were corrected and rechecked. INDEPENDENT-V5-IMPLEMENTATION-REVIEW.md contains the findings,
+resolutions, runtime hashes and independent SQL evidence. The final source hash manifest
+identifies the delivered document-addon source.
+
+Keeping stock does not prove its financial balance is missing in the destination. Source
+stock-linked journal entries require verified existing adoption; no extra inventory balance
+is replayed over unknown openings. Other existing ledger overlap still needs accountant
+review. Similarity decisions cannot repair every duplicate or altered import in the old
+ledger. Full-table freshness scans and table locks remain maintenance-window operations;
+time large connected groups on a restored copy.
+
+No production database, supplier, live bank/provider, EDI service or stock-migration workflow
+was accessed. Provider/EDI execution and paired/statement-generated payment adoption remain
+unsupported. This is a tested candidate for restored-copy validation, not production certification.

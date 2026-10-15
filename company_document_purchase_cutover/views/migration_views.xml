@@ -1,1 +1,21 @@
-<odoo><record id="document_purchase_form" model="ir.ui.view"><field name="name">company.document.cutover.purchase.form</field><field name="model">company.document.cutover</field><field name="inherit_id" ref="company_document_cutover.document_form"/><field name="arch" type="xml"><field name="include_accounting" position="after"><field name="include_purchase" readonly="state == 'done'"/><field name="old_operations_frozen" invisible="not include_purchase" readonly="state == 'done'"/></field><xpath expr="//field[@name='report']/.." position="before"><div class="alert alert-info" role="status" invisible="not include_purchase">Already received or billed orders need a matching PO and receipt/return history in the new company. Ask your accountant to select those existing records below. Bills will be linked to that PO. Missing history is listed in the review; this tool does not create past deliveries.</div></xpath></field></record></odoo>
+<odoo>
+ <record id="document_purchase_form" model="ir.ui.view">
+  <field name="name">company.document.cutover.purchase.form</field><field name="model">company.document.cutover</field><field name="inherit_id" ref="company_document_cutover.document_form"/>
+  <field name="arch" type="xml">
+   <field name="include_accounting" position="after">
+    <field name="include_purchase" readonly="state == 'done'"/>
+    <field name="purchase_history_mode" invisible="not include_purchase" readonly="state == 'done'"/>
+    <field name="old_operations_frozen" invisible="not include_purchase" readonly="state == 'done'"/>
+   </field>
+   <xpath expr="//field[@name='report']/.." position="before">
+    <div class="alert alert-info" role="status" invisible="not include_purchase or purchase_history_mode != 'preserve_stock'">Current stock stays unchanged. Orders with missing receipt or bill history are saved as historical references. They create no live order or delivery. Explicitly matched existing orders are verified and reused. Untouched orders can still become live commitments; check those in the review.</div>
+    <div class="alert alert-info" role="status" invisible="not include_purchase or purchase_history_mode != 'native'">Select matching existing orders and receipts below. Missing or different history is listed together in the review. This option does not create past deliveries.</div>
+   </xpath>
+   <xpath expr="//group[field[@name='report']]" position="after">
+    <group string="Historical references — no live commitments" invisible="not purchase_archive_ids" groups="purchase.group_purchase_manager">
+     <field name="purchase_archive_ids" nolabel="1"><list create="0" edit="0" delete="0"><field name="name"/><field name="source_company_id"/><field name="saved_filename" column_invisible="True"/><field name="saved_documents" filename="saved_filename"/></list></field>
+    </group>
+   </xpath>
+  </field>
+ </record>
+</odoo>
